@@ -11,8 +11,13 @@ local Utils = require("rasial.utils")
 
 --[[
     A friendly message:
-    Hello! It's worth taking some time understanding how things work before playing around with some of the values.
-    Feel free to bring all your questions and comments to the discord thread.
+        Hello! It's worth taking some time understanding how things work before playing around with some of the values.
+        
+        This script could have been much simpler and even consolidated into one file, but the main intention behind making this
+        was to showcase the libraries being used and their potential when making more complex PVM'ing scripts.
+
+    That being said, please feel free to bring all your questions and comments to the discord thread.
+    ---------
 
     Here's a quick breakdown of the configurations:
 
@@ -29,13 +34,17 @@ local Utils = require("rasial.utils")
         You are invited to change and mess around without things here until you're happy with the result.
         - Will execute a rotation listed, one step at a time. (More details in rotation_manager.lua)
             - step = {
-                label: string,                  Name of the ability or inventory item, needs to be accurate
+                label: string,                  The name of the ability or inventory item. Needs to be 100% accurate
                 type: string,                   [OPTIONAL] Type of step used. Can be: "Ability" (default), "Inventory", "Improvise", or "Custom" (default: "Ability")
                 action: function(): boolean,    [OPTIONAL] The function to execute with type = "Custom"
                 wait: number,                   [OPTIONAL] The amount of time to wait before executing the next step (default 3 ticks)
                 useTicks: boolean,              [OPTIONAL] Whether or not to use game ticks or real-time for waiting (default: true)
-                style: string                   [OPTIONAL] Used for improvising: Only "Necromancy" is currently supported
-                useAdren: boolean               [OPTIONAL] If true, will attempt to spend adrenaline as it sees fit
+                style: string,                  [OPTIONAL] Used for improvising: Only "Necromancy" is currently supported
+                useAdren: boolean,              [OPTIONAL] If true, will attempt to spend adrenaline as it sees fit
+                condition: function(): boolean, [OPTIONAL] If true, will execute the step, otherwise it will attempt to either use replacementAction or skip 
+                replacementLabel: string,       [OPTIONAL] Replacement ability for when step condition is not met
+                replacementAction: function     [OPTIONAL] Replacement action for when step condition is not met 
+                replacementWait: number         [OPTIONAL] Replacement wait time for when step condition is not met 
             }
         - You can have different rotations for different stages.
 
@@ -51,15 +60,11 @@ local Utils = require("rasial.utils")
             refreshAt: number                   [OPTIONAL] Number of seconds to refresh the buff at
         }
 
-### WHAT YOU NEED TO KNOW:
-    haw haw haw
 ]]
 
 Config.Instances, Config.TrackedKills = {}, {}
 
 Config.UserInput = {
-    --set to true if you want to see debugging messages and metrics
-    debug = false,
     -- essential
     useBankPin = false,
     bankPin = 1234,                 -- use ur own [0000 will spam your console]
@@ -67,7 +72,7 @@ Config.UserInput = {
     -- health and prayer thresholds (settings for player manager)
     healthThreshold = {
         normal = {type = "percent", value = 50},
-        critical = {type = "percent", value = 25},
+        critical = {type = "percent", value = 50},
         special = {type = "percent", value = 75}  -- excal threshold
     },
     prayerThreshold = {
@@ -77,15 +82,15 @@ Config.UserInput = {
     },
     -- things to check in your inventory before fight
     presetChecks = {
-        {id = 48951, amount = 10}, -- vuln bombs
-        {id = 29448, amount = 4},  -- guthix rests
-        {id = 42267, amount = 8},  -- blue blubbers
+        {id = 48951, amount = 10}, -- 10 x vuln bombs
+        {id = 29448, amount = 4},  -- 4  x guthix rests
+        {id = 42267, amount = 8},  -- 8  x blue blubbers
     },
     --discord (private method)
-    discordNotifications = false,
-    webhookUrl = "",
-    mention = false,
-    userId = ""
+    discordNotifications = true,
+    webhookUrl = "WEBHOOK URL HERE",
+    mention = true,
+    userId = "12345678910"
 }
 
 Config.Variables = {
@@ -173,6 +178,7 @@ Config.Data = {
         },
         [55496] = {
             name = "Foot wraps of the First Necromancer",
+            prefix = "a pair of",
             thumbnail = "https://runescape.wiki/images/thumb/Foot_wraps_of_the_First_Necromancer_detail.png/152px-Foot_wraps_of_the_First_Necromancer_detail.png?6b9d4"
         },
         [55674] = {
@@ -184,7 +190,6 @@ Config.Data = {
     lootedUniques = {}
 }
 
-
 --#region rotation manager init
 Config.RotationManager = {
     -- this rotation references and tries to match the equilibrium rotation listed on the PVME
@@ -193,32 +198,51 @@ Config.RotationManager = {
         name = "Fight Rotation",
         rotation = {
             --prefight steps
+            {label = "Delay", type = "Custom", action = function() return true end, wait = 1},
             {label = "Command Vengeful Ghost"},
             {label = "Invoke Death", wait = 1},
             {label = "Salve amulet (e)", type = "Custom", action = function() return Inventory:Equip("Salve amulet (e)") end, wait = 0},
-            {label = "Surge"},
+            {label = "Surge", wait = 2},
             {label = "Command Skeleton Warrior"},
-            {label = "Target cycle", type = "Custom", action = function()
-                print("Tick: "..API.Get_tick() - Config.Timer.handleInstance.lastTriggered)
-                API.KeyboardPress2(Config.UserInput.targetCycleKey, 60, 0)
-                return true
-            end, wait = 0},
-            --safety target cycle
-            {label = "Target cycle", type = "Custom", action = function()
-                if API.ReadTargetInfo(true).Hitpoints > 0 then
-                    return true
-                else
+            {
+                label = "Target cycle",
+                type = "Custom",
+                action = function()
+                    print("[TARGET CYCLE]: Tick = "..API.Get_tick() - Config.Timer.handleInstance.lastTriggered)
                     API.KeyboardPress2(Config.UserInput.targetCycleKey, 60, 0)
                     return true
-                end
-            end, wait = 0},
+                end,
+                wait = 0
+            },
             {label = "Vulnerability bomb", type = "Inventory", wait = 0},
-            {label = "Death Skulls"},
+            {label = "Death Skulls", wait = 1},
+
+            -- back up attack rasial if tc misses
+            {
+                label = "Backup Attack Rasial",
+                type = "Custom",
+                condition = function() return (API.ReadTargetInfo(true).Hitpoints <= 0) and (API.GetABs_name1("Death Skulls").cooldown_timer <= 0) end,
+                action = function()
+                    local rasial = Utils.find(30165, 1, 40)
+                    if rasial then
+                        ---@diagnostic disable-next-line
+                        if API.DoAction_NPC(0x2a, API.OFF_ACT_AttackNPC_route, {30165}, 50) then
+                            return RotationManager:_useAbility("Death Skulls")
+                        end
+                    else return false end
+                end,
+                wait = 3,
+                useTicks = true,
+                replacementAction = function() return true end,
+                replacementWait = 2
+            },
+
             --pre living death steps
             {label = "Soul Sap"},
             {label = "Touch of Death"},
             {label = "Basic<nbsp>Attack"},
             {label = "Soul Sap"},
+
             -- living death steps
             {label = "Living Death", wait = 0},
             {label = "Adrenaline renewal", type = "Inventory"}, -- can also not have type defined if it's on the ability bar
@@ -230,7 +254,7 @@ Config.RotationManager = {
             {label = "Divert"},
             {label = "Bloat"},
             {label = "Soul Sap"},
-            {label = "Command Skeleton Warrior", useTicks = true},
+            {label = "Command Skeleton Warrior", condition = function() return (tonumber(API.GetAddreline_() > 60)) end, replacementLabel = "Basic<nbsp>Attack"}, -- here
             {label = "Death Skulls", wait = 2, useTicks = true},
             {label = "Undead Slayer", wait = 1, useTicks = true},
             {label = "Finger of Death"},
@@ -240,12 +264,15 @@ Config.RotationManager = {
             {label = "Finger of Death"},
             {label = "Soul Sap"},
             {label = "Death Skulls"},
+
             -- post living death
             {label = "Bloat"},
             {label = "Soul Sap"},
             {label = "Touch of Death"},
             {label = "Basic<nbsp>Attack"},
             {label = "Soul Sap"},
+
+            --improvise
             {label = "Improvise", type = "Improvise", style = "Necromancy", spendAdren = true}
         }
     },
@@ -255,15 +282,27 @@ Config.RotationManager = {
             --final phase steps
             {label = "Basic<nbsp>Attack"},
             {label = "Vulnerability bomb", type = "Inventory", wait = 0},
+
+            -- backup basic attack
+            {label = "Basic<nbsp>Attack", condition = function() return (API.GetAddreline_() < 60) end, wait = 3, useTicks = true},
             {label = "Death Skulls"},
             {label = "Soul Sap"},
-            {label = "Weapon Special Attack"},
-            {label = "Volley of Souls"},
-            {label = "Basic<nbsp>Attack"},
-            {label = "Essence of Finality", type = "Custom", action = function() return Inventory:Equip("Essence of Finality") end, useTicks = false, wait = 0},
-            {label = "Essence of Finality"},
-            {label = "Salve amulet (e)", type = "Custom", action = function() return Inventory:Equip("Salve amulet (e)") end, wait = 0},
-            {label = "Touch of Death"},
+            {label = "Weapon Special Attack", condition = function() return (API.GetAdrenalineFromInterface() > 22) end}, -- here
+            {label = "Volley of Souls", condition = function() return RotationManager:getBuff(30123).remaining > 1 end}, -- here
+            {label = "Basic<nbsp>Attack", wait = 2},
+            {
+                label = "Equip Essence of Finality",
+                type = "Custom",
+                condition = function() return (API.GetAdrenalineFromInterface() > 22) end,
+                action = function() Inventory:Equip("Essence of Finality") return true end,
+                useTicks = true,
+                wait = 1,
+                replacementAction = function() return true end,
+            },
+            {label = "Essence of Finality", condition = function() return (API.GetAdrenalineFromInterface() > 22) end}, -- here 
+            {label = "Equip Salve amulet (e)", type = "Custom", action = function() if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end return true end, wait = 0}, -- here
+
+            -- improvise
             {label = "Improvise", type = "Improvise", style = "Necromancy", spendAdren = true}
         }
     }
@@ -319,10 +358,11 @@ Config.Buffs = {
         buffId = 26095, -- summoning buff lol
         canApply = function(state) return not state:getBuff(26095).found end,
         execute = function() return API.DoAction_Inventory3("Binding contract (ripper demon)", 0, 1, API.OFF_ACT_GeneralInterface_route) end,
+        refreshAt = 10
     }
 }
 
---returns prayer flicker init
+--#region prayer flicker init
 Config.prayerFlicker = {
     prayers = {
         PrayerFlicker.PRAYERS.SOUL_SPLIT,
@@ -730,7 +770,6 @@ Config.Timer = {
                 for _, chat in ipairs(API.GatherEvents_chat_check()) do
                     if string.find(chat.text, "Completion Time") then
                         killTime = chat.text:gsub("<col=2DBA14>Completion Time:</col> ", "")
-                        print(killTime)
                     end
                 end
                 Config.Variables.killCount = Config.Variables.killCount + 1
@@ -738,9 +777,17 @@ Config.Timer = {
                     runtime = API.ScriptRuntimeString(),
                     fightDuration = killTime
                 }
-                Config.Variables.bossDead = true
                 return true
             end
+        }
+    ),
+    -- waits for loot.
+    waitForLoot = Timer.new(
+        {
+            name = "Waiting for loot...",
+            cooldown = 5,
+            condition = function () return true end,
+            action = function() Config.Variables.bossDead = true return true end
         }
     ),
     uniqueDropped = Timer.new(
@@ -757,7 +804,8 @@ Config.Timer = {
                     for _, drop in pairs(uniqueDrops) do
                         local killData = Config.TrackedKills[Config.Variables.killCount]
                         local dropData = Config.Data.uniqueDropData[drop.Id]
-                        Utils.sendDiscordWebhook((Config.UserInput.mention and "<@"..Config.UserInput.userId..">") or "", Config.UserInput.webhookUrl, {
+                        table.insert(Config.Data.lootedUniques, ({"["..Config.Variables.killCount.."] "..dropData.name, killData.runtime}))
+                        Utils.sendDiscordWebhook((Config.UserInput.mention and "^<@"..Config.UserInput.userId.."^>") or "", Config.UserInput.webhookUrl, {
                             embeds = {
                                 {
                                     title = string.format("Congratulations! You found %s%s", dropData.prefix or (dropData.name ~= "Miso's collar") and "a " or "", dropData.name),
@@ -770,7 +818,7 @@ Config.Timer = {
                                     thumbnail = {url = dropData.thumbnail},
                                     fields = {
                                         {name = "Kill Number", value = tostring(Config.Variables.killCount), inline = true},
-                                        {name = "Fight Duration", value = killData.killDuration, inline = true},
+                                        {name = "Fight Duration", value = killData.fightDuration, inline = true},
                                         {name = "Runtime", value = killData.runtime, inline = true},
                                     }
                                 }
@@ -790,9 +838,8 @@ Config.Timer = {
             cooldown = 1,
             condition = function() return true end,
             action = function(state)
-                Config.Timer.uniqueDropped:execute()
                 if API.DoAction_Loot_w(Utils.virtualTableConcat(Config.Data.loot, Config.Data.uniques), 30, API.PlayerCoordfloat(), 30) then
-                    Config.Timer.collectDeath:execute()
+                    Config.Timer.uniqueDropped:execute()
                     return true
                 end
                 return false
@@ -925,7 +972,7 @@ Config.playerManager = {
         {
             name = "Navigate to Adrenaline crytals",
             condition = function(self)
-                if self.state.adrenaline >= 100 then return false end
+                if self.state.adrenaline >= 100 and not self:getDebuff(26094).found then return false end
                 if Utils.find(114749, 12, 60) then
                     local crystal = Utils.find(114749, 12, 60).Tile_XYZ
                     return self.state.location == "War's Retreat" and not Utils.atLocation(crystal.x, crystal.y, 6)
@@ -937,7 +984,10 @@ Config.playerManager = {
         },
         {
             name = "Channeling adrenaline",
-            condition = function(self) return self.state.location == "War's Retreat" and self.state.adrenaline < 100 end,
+            condition = function(self)
+                return self.state.location == "War's Retreat" and
+                    (self.state.adrenaline < 100 or self:getDebuff(26094).found)
+            end,
             execute = function(self) Config.Timer.channelAdren:execute(self) end,
             priority = 6
         },
@@ -1001,7 +1051,7 @@ Config.playerManager = {
         {
             name = "Getting in position",
             condition = function(self)
-                local rasial = self.state.location == "Rasial's Citadel (Boss Room)" and (not Utils.find(30165, 1, 20) or (Utils.find(30165, 1, 20) and Utils.find(30165, 1, 20).Life > 0))
+                local rasial = (self.state.location == "Rasial's Citadel (Boss Room)") and (not Utils.find(30165, 1, 20) or (Utils.find(30165, 1, 20) and (Utils.find(30165, 1, 20).Life > 0)))
                 return not Config.Variables.bossDead and rasial and not Utils.atLocation(Config.Variables.safeSpot.x, Config.Variables.safeSpot.y, 1)
             end,
             execute = function(self)
@@ -1035,19 +1085,23 @@ Config.playerManager = {
                     return not Config.Variables.bossDead and rasial and rasial.Life <= 199000 and rasial.Life > 0
             end,
             execute = function(self)
-                if Config.Instances.finalRotation.index == 1 then
+                if Config.Instances.finalRotation.index == 1 and Config.Instances.finalRotation.timer.lastTriggered == 0 then
                     Utils.debugLog("Transferring cooldowns...")
                     Config.Instances.finalRotation.timer.lastTriggered = Config.Instances.fightRotation.timer.lastTriggered
+                    Utils.debugLog("Last Triggered: 0 -> "..Config.Instances.finalRotation.timer.lastTriggered)
                     Config.Instances.finalRotation.timer.lastTime = Config.Instances.fightRotation.timer.lastTime
+                    Utils.debugLog("Last Time     : 0 -> "..Config.Instances.finalRotation.timer.lastTime)
                     Config.Instances.finalRotation.timer.cooldown = Config.Instances.fightRotation.timer.cooldown
+                    Utils.debugLog("Cooldown      : 0 -> "..Config.Instances.finalRotation.timer.cooldown)
                     Config.Instances.finalRotation.trailing = true
+                    Utils.debugLog("Trailing?     : "..(Config.Instances.finalRotation.timer.trailing and "Yes" or "No"))
                 end
                 Config.Instances.finalRotation:execute()      -- rotation_manager
                 Config.Timer.dodge:execute(self)
                 self:manageHealth()
                 self:managePrayer()
                 self:manageBuffs(Config.Buffs)
-                Config.Instances.prayerFlicker:update() -- how tf
+                Config.Instances.prayerFlicker:update()
                 if Utils.find(30165, 1, 20) and Utils.find(30165, 1, 20).Life <= 30000 then Config.Timer.equipLuckRing:execute() end
             end,
             priority = 5
@@ -1057,7 +1111,7 @@ Config.playerManager = {
             condition = function(self)
                 local rasial = self.state.location == "Rasial's Citadel (Boss Room)"
                 and Utils.find(30165, 1, 20)
-                return rasial and true or false
+                return rasial and rasial.Life > 0 or false
             end,
             execute = function(self)
                 Config.Instances.fightRotation:execute()      -- rotation_manager
@@ -1070,24 +1124,41 @@ Config.playerManager = {
         },
         -- post fight
         {
+            name = "Confirming boss death",
+            condition = function(self)
+                local rasial = (self.state.location == "Rasial's Citadel (Boss Room)") and (Utils.find(30165, 1, 20) and (Utils.find(30165, 1, 20).Life == 0))
+                return not Config.Variables.bossDead and rasial
+            end,
+            execute = function(self) Config.Timer.waitForLoot:execute() end,
+            priority = 20
+        },
+        {
             name = "Getting in position for loot",
             condition = function(self)
-                local rasial = self.state.location == "Rasial's Citadel (Boss Room)" and Utils.find(30165, 1, 20) and Utils.find(30165, 1, 20).Life == 0
-                return not Config.Variables.bossDead and rasial and not Utils.atLocation(Config.Variables.lootSpot.x, Config.Variables.lootSpot.y, 1)
+                return Config.Variables.bossDead and not Utils.atLocation(Config.Variables.lootSpot.x, Config.Variables.lootSpot.y, 1) and not Config.Timer.waitForLoot:canTrigger()
             end,
-            execute = function(self) Config.Timer.getInLootPosition:execute(self) end,
+            execute = function(self) Config.Timer.equipLuckRing:execute() Config.Timer.getInLootPosition:execute(self) end,
+            priority = 5
+        },
+        {
+            name = "Waiting for loot",
+            condition = function(self)
+                return Config.Variables.bossDead and Utils.atLocation(Config.Variables.lootSpot.x, Config.Variables.lootSpot.y, 1) and not Config.Timer.waitForLoot:canTrigger()
+            end,
+            execute = function(self) end,
             priority = 5
         },
         {
             name = "Looting",
             condition = function() return (#API.GetAllObjArray1(Utils.virtualTableConcat(Config.Data.loot, Config.Data.uniques), 70, {3}) > 0) end,
-            execute = function() Config.Timer.pickupLoot:execute() end,
+            execute = function() Config.Timer.pickupLoot:execute() Config.Timer.waitForLoot:reset() end,
             priority = 10
         },
         {
             name = "Teleport to War's",
-            condition = function(self) return Config.Variables.bossDead and #API.GetAllObjArray1(Utils.virtualTableConcat(Config.Data.loot, Config.Data.uniques), 70, {3}) == 0 end,
+            condition = function(self) return Config.Variables.bossDead and Config.Timer.waitForLoot:canTrigger() and #API.GetAllObjArray1(Utils.virtualTableConcat(Config.Data.loot, Config.Data.uniques), 70, {3}) == 0 end,
             execute = function(self)
+                Config.Timer.collectDeath:execute()
                 Config.Timer.teleportToWars:execute(self)
                 Config.Instances.fightRotation:reset()
                 Config.Instances.finalRotation:reset()
