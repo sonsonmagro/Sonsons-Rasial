@@ -257,10 +257,14 @@ end
 ---@param time string
 ---@return integer
 function Utils.parseCompletionTime(time)
-    local minutes, seconds, hundredths = time:match("(%d+):(%d+)%.(%d)")
+    local minutes, seconds, hundredths = time:match("(%d+):(%d+)%.?(%d?)")
     if not minutes then return 0 end
-
-    return (tonumber(minutes) * 60 * 1000) + (tonumber(seconds) * 1000) + (tonumber(hundredths) * 100)
+    
+    minutes = tonumber(minutes) or 0
+    seconds = tonumber(seconds) or 0
+    hundredths = tonumber(hundredths) or 0  -- will be 0 if empty string
+    
+    return (minutes * 60 * 1000) + (seconds * 1000) + (hundredths * 10)
 end
 
 ---formats number back to kill time duration [00:00.0]
@@ -270,12 +274,13 @@ function Utils.formatKillDuration(ms)
     local minutes = math.floor(ms / 60000)
     ms = ms % 60000
     local seconds = math.floor(ms / 1000)
-    local hundredths = math.floor((ms % 1000) / 10 + 0.5) -- Rounds to nearest .01 seconds
+    local hundredths = math.floor((ms % 100) / 10 + 0.5) -- Rounds to nearest .01 seconds
+    if not hundredths then hundredths = 0 end
 
     -- Handle overflow (e.g., 100ms becomes 1.00s)
-    if hundredths >= 100 then
+    if hundredths >= 10 then
         seconds = seconds + 1
-        hundredths = hundredths - 100
+        hundredths = hundredths - 10
     end
     if seconds >= 60 then
         minutes = minutes + 1
@@ -287,8 +292,8 @@ end
 
 
 function Utils.getKillStats(log)
+    -- handle empty data
     if #log == 0 then
-        -- handle empty data
         return {
             fastestKillDuration = "N/A",
             slowestKillDuration = "N/A",
@@ -299,19 +304,16 @@ function Utils.getKillStats(log)
     local durations = {}
     local total = 0
 
-    -- Parse all durations
     for _, kill in ipairs(log) do
         local ms = Utils.parseCompletionTime(kill.fightDuration)
         table.insert(durations, ms)
         total = total + ms
     end
 
-    -- Calculate stats
     local fastestMs = math.min(table.unpack(durations))
     local slowestMs = math.max(table.unpack(durations))
     local averageMs = total / #durations
 
-    -- Format results
     return {
         fastestKillDuration = Utils.formatKillDuration(fastestMs),
         slowestKillDuration = Utils.formatKillDuration(slowestMs),
