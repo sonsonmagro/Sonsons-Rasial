@@ -1,5 +1,5 @@
 ---@module 'Timer'
----@version 1.0.0
+---@version 1.0.1
 --[[
     File: timer.lua
     Description : Manages your actions and avoids spamming without having to use sleep
@@ -109,6 +109,7 @@ end
 ---resets the timer's last triggered
 function Timer:reset()
     self.lastTriggered = 0
+    self.lastTime = 0
 end
 
 return Timer
