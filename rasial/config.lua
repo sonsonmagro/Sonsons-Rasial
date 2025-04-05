@@ -785,7 +785,7 @@ Config.Timer = {
     waitForLoot = Timer.new(
         {
             name = "Waiting for loot...",
-            cooldown = 5,
+            cooldown = 7,
             condition = function () return true end,
             action = function() Config.Variables.bossDead = true return true end
         }
