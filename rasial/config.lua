@@ -287,19 +287,19 @@ Config.RotationManager = {
             {label = "Basic<nbsp>Attack", condition = function() return (API.GetAddreline_() < 60) end, wait = 3, useTicks = true},
             {label = "Death Skulls"},
             {label = "Soul Sap"},
-            {label = "Weapon Special Attack", condition = function() return (API.GetAdrenalineFromInterface() > 22) and not RotationManager:getDebuff(55524).found end}, -- here
+            {label = "Weapon Special Attack", condition = function() return (API.GetAdrenalineFromInterface() > 23) and not RotationManager:getDebuff(55524).found end}, -- here
             {label = "Volley of Souls", condition = function() return RotationManager:getBuff(30123).remaining > 1 end}, -- here
             {label = "Basic<nbsp>Attack", wait = 2},
             {
                 label = "Equip Essence of Finality",
                 type = "Custom",
-                condition = function() return (API.GetAdrenalineFromInterface() > 22) and not RotationManager:getDebuff(55524).found end,
+                condition = function() return (API.GetAdrenalineFromInterface() > 23) and not RotationManager:getDebuff(55524).found end,
                 action = function() Inventory:Equip("Essence of Finality") return true end,
                 useTicks = true,
                 wait = 1,
                 replacementAction = function() return true end,
             },
-            {label = "Essence of Finality", condition = function() return (API.GetAdrenalineFromInterface() > 22) end}, -- here 
+            {label = "Essence of Finality", condition = function() return (API.GetAdrenalineFromInterface() > 23) end}, -- here 
             {label = "Equip Salve amulet (e)", type = "Custom", action = function() if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end return true end, wait = 0}, -- here
 
             -- improvise
@@ -913,7 +913,7 @@ Config.playerManager = {
         },
         {
             name = "Resetting tracked Config.Variables",
-            condition = function(self) return Config.Variables.bossDead and self.state.location == "War's Retreat" end,
+            condition = function(self) return Config.Variables.gateTile ~= nil and self.state.location == "War's Retreat" end,
             execute = function(self)
                 Utils.debugLog("Resetting everything")
                     -- reset everything
