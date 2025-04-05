@@ -254,7 +254,7 @@ Config.RotationManager = {
             {label = "Divert"},
             {label = "Bloat"},
             {label = "Soul Sap"},
-            {label = "Command Skeleton Warrior", condition = function() return (tonumber(API.GetAddreline_() > 60)) end, replacementLabel = "Basic<nbsp>Attack"}, -- here
+            {label = "Command Skeleton Warrior", condition = function() return (API.GetAdrenalineFromInterface() > 60) end, replacementLabel = "Basic<nbsp>Attack"}, -- here
             {label = "Death Skulls", wait = 2, useTicks = true},
             {label = "Undead Slayer", wait = 1, useTicks = true},
             {label = "Finger of Death"},
@@ -269,11 +269,11 @@ Config.RotationManager = {
             {label = "Bloat"},
             {label = "Soul Sap"},
             {label = "Touch of Death"},
-            {label = "Basic<nbsp>Attack"},
+            {label = "Command Skeleton Warrior"},
             {label = "Soul Sap"},
 
             --improvise
-            {label = "Improvise", type = "Improvise", style = "Necromancy", spendAdren = true}
+            {label = "Improvise", type = "Improvise", style = "Necromancy", spend = false}
         }
     },
     finalRotation = {
@@ -287,13 +287,13 @@ Config.RotationManager = {
             {label = "Basic<nbsp>Attack", condition = function() return (API.GetAddreline_() < 60) end, wait = 3, useTicks = true},
             {label = "Death Skulls"},
             {label = "Soul Sap"},
-            {label = "Weapon Special Attack", condition = function() return (API.GetAdrenalineFromInterface() > 22) end}, -- here
+            {label = "Weapon Special Attack", condition = function() return (API.GetAdrenalineFromInterface() > 22) and not RotationManager:getDebuff(55524).found end}, -- here
             {label = "Volley of Souls", condition = function() return RotationManager:getBuff(30123).remaining > 1 end}, -- here
             {label = "Basic<nbsp>Attack", wait = 2},
             {
                 label = "Equip Essence of Finality",
                 type = "Custom",
-                condition = function() return (API.GetAdrenalineFromInterface() > 22) end,
+                condition = function() return (API.GetAdrenalineFromInterface() > 22) and not RotationManager:getDebuff(55524).found end,
                 action = function() Inventory:Equip("Essence of Finality") return true end,
                 useTicks = true,
                 wait = 1,
@@ -303,7 +303,7 @@ Config.RotationManager = {
             {label = "Equip Salve amulet (e)", type = "Custom", action = function() if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end return true end, wait = 0}, -- here
 
             -- improvise
-            {label = "Improvise", type = "Improvise", style = "Necromancy", spendAdren = true}
+            {label = "Improvise", type = "Improvise", style = "Necromancy", spend = true}
         }
     }
 }
