@@ -1,4 +1,4 @@
----@version 1.2.1
+---@version 1.2.2
 --[[
     File: player_manager.lua
     Description: Manage your player's state from one dynamic instance
@@ -9,6 +9,8 @@
         - Summoning Management
         - Aura Management
 ]]
+
+local debug = false
 
 ---@class PlayerManager
 ---@field config PlayerManagerConfig
@@ -180,7 +182,6 @@ end
 
 --#region PlayerState methods
 
-local debug = false
 function PlayerManager.debugLog(message)
     if debug then
         print(
