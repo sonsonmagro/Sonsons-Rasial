@@ -1,5 +1,5 @@
 ---@module 'rotation_manager'
----@version 0.0.1
+---@version 1.0.1
 
 local RotationManager = {}
 RotationManager.__index = RotationManager
