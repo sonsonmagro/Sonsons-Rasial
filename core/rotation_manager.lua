@@ -266,11 +266,12 @@ function RotationManager:_improvise(spend)
         end
     end
 
+    -- equips salve amulet (e) if in inventory
     if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end
 
-    -- If no execute, use basic rotation
+    -- if no execute, use basic rotation
     if ability == "Basic<nbsp>Attack" then
-        if spend and not self:getDebuff(55524).found and Inventory:GetItem("Essence of Finality") and (adren > 22) then
+        if spend and not self:getDebuff(55524).found and Inventory:GetItem("Essence of Finality") and (adren > 23) then
             Inventory:Equip("Essence of Finality")
             API.RandomSleep2(60, 40, 20)
             ability = "Essence of Finality"
