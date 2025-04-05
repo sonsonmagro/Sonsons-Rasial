@@ -556,26 +556,45 @@ Config.Timer = {
             action = function(playerManager)
                 --checks if conjures are summoned or animation matches summoning animation
                 local zombieGhostSkellyCheck = playerManager:getBuff(34177).found and playerManager:getBuff(34178).found and playerManager:getBuff(34179).found
-                if (playerManager.state.animation == 35502) or zombieGhostSkellyCheck then
+                local conjuresExpiring = (playerManager:getBuff(34177).remaining < 59) or (playerManager:getBuff(34178).remaining < 59) or (playerManager:getBuff(34179).remaining < 59)
+                if (playerManager.state.animation == 35502) or (zombieGhostSkellyCheck and not conjuresExpiring) then
                     Config.Variables.conjuresSummoned = true
                 end
-    
+
                 -- reset flexTimer in case it was used elswhere
                 -- override flexTimer configuration
-                if not ((Config.Timer.flexTimer.name == "Summoning conjures") or (Config.Timer.flexTimer.name == "Excalibur in off-hand -> Equipping lantern")) then
+                if not ((Config.Timer.flexTimer.name == "Summoning conjures") or (Config.Timer.flexTimer.name == "Equipping lantern") or (Config.Timer.flexTimer.name == "Unequipping lantern")) then
                     Config.Timer.flexTimer.cooldown = 1
                     Config.Timer.flexTimer.useTicks = true
                     Config.Timer.flexTimer:reset()
                 end
-    
-                --equip lantern if excal is in off-hand
-                if playerManager:_hasExcalibur() and playerManager:_hasExcalibur().location == "equipped" then
-                    Config.Timer.flexTimer.action = function(playerManager) return Inventory:Equip("Augmented Soulbound lantern") end
-                    Config.Timer.flexTimer.name = "Excalibur in off-hand -> Equipping lantern"
+
+                -- summons are not healthy
+                if conjuresExpiring and (playerManager:getBuff(34178).found or playerManager:getBuff(34179).found) then
+                    ---@diagnostic disable-next-line
+                    Config.Timer.flexTimer.action = function(playerManager) return API.DoAction_Interface(0xffffffff,0xdcad,1,1464,15,5,API.OFF_ACT_GeneralInterface_route) end
+                    Config.Timer.flexTimer.name = "Unequipping lantern"
+                    Config.Timer.flexTimer.cooldown = 1
+                    Config.Timer.flexTimer.useTicks = true
+                    Config.Timer.flexTimer:execute(playerManager)
+                end
+
+                local lanternInInventory = false
+                for _, item in ipairs(API.ReadInvArrays33()) do
+                    if string.find(item.textitem, "lantern") then
+                        lanternInInventory = true
+                        break
+                    end
+                end
+
+                --equip lantern
+                if lanternInInventory then
+                    Config.Timer.flexTimer.action = function(playerManager) return API.DoAction_Inventory3("lantern", 0, 2, API.OFF_ACT_GeneralInterface_route) end
+                    Config.Timer.flexTimer.name = "Equipping lantern"
                     Config.Timer.flexTimer:execute(playerManager)
                     return true -- exits out of sequence and activates summonConjure's timer
                 end
-    
+
                 if Config.Timer.flexTimer:canTrigger(playerManager) then
                     if Config.Variables.conjureAttempts <= 5 then
                         --overrides flexTimer's name, cooldowns and actions
