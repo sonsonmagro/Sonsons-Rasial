@@ -800,6 +800,7 @@ Config.Timer = {
                 local uniqueDrops, success = API.GetAllObjArray1(Config.Data.uniques, 30, {3}), false
 
                 if uniqueDrops and Config.UserInput.discordNotifications then
+                    Config.Timer.collectDeath:execute()
                     -- double drops are 1/40k-ish
                     for _, drop in pairs(uniqueDrops) do
                         local killData = Config.TrackedKills[Config.Variables.killCount]
