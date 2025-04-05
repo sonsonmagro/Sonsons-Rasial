@@ -20,7 +20,7 @@ local debug = true
 ---@field replacementLabel string?
 ---@field replacementAction function?
 ---@field replacementWait number?
----@field spendAdren boolean? spend adrenaline when improvising
+---@field spend boolean? spend adrenaline when improvising
 
 
 ---@class RotationManager
@@ -155,7 +155,7 @@ function RotationManager:execute()
                 end
             elseif step.type == "Improvise" and step.style == "Necromancy" then
                 self.debugLog("= Step type: Improvise")
-                local ability = self:_improvise(step.spendAdren)
+                local ability = self:_improvise(step.spend)
                 self.debugLog("= Designated improvise ability: "..ability)
                 if self:_useAbility(ability) then
                     self.debugLog("+ Ability cast was successful")
@@ -238,7 +238,7 @@ function RotationManager:execute()
     return false
 end
 
-function RotationManager:_improvise(spendAdren)
+function RotationManager:_improvise(spend)
     local targetHealth, adren = API.ReadTargetInfo(true).Hitpoints, tonumber(API.GetAdrenalineFromInterface())
     local soulStacks = self:getBuff(30123).found and self:getBuff(30123).remaining or 0
     local necrosisStacks = self:getBuff(30101).found and self:getBuff(30101).remaining or 0
@@ -257,28 +257,26 @@ function RotationManager:_improvise(spendAdren)
 
     -- execution checks
     -- volley into finger
-    if (soulStacks >= 3) and (possibleFingers >= 1) and (targetHealth - 30000 <= (soulStacks * 8000) + 15000) then
+    if (soulStacks >= 3) and (possibleFingers >= 1) and (targetHealth - 30000 <= (soulStacks * 8000) + 13000) then
         ability = "Volley of Souls"
     -- fingers of death
     else
-        if targetHealth - 30000 <= possibleFingers * 15000 then
+        if targetHealth - 30000 <= possibleFingers * 13000 then
             ability = "Finger of Death"
         end
     end
 
-    if not spendAdren and (ability == "Basic<nbsp>Attack")  and (adren < 64) then
-        if (soulStacks < 5) and (API.GetABs_name1("Soul Sap").cooldown_timer <= 1) then
-            ability = "Soul Sap"
-        elseif (necrosisStacks < 12) and (API.GetABs_name1("Touch of Death").cooldown_timer <= 1) then
-            ability = "Touch of Death"
-        else
-            goto continue
-        end
-    end
+    if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end
 
     -- If no execute, use basic rotation
     if ability == "Basic<nbsp>Attack" then
-        if soulStacks == 5 then
+        if spend and not self:getDebuff(55524).found and Inventory:GetItem("Essence of Finality") and (adren > 22) then
+            Inventory:Equip("Essence of Finality")
+            API.RandomSleep2(60, 40, 20)
+            ability = "Essence of Finality"
+        elseif spend and (adren - necrosisStacks*10) > 46 then
+            ability = "Finger of Death"
+        elseif soulStacks == 5 then
             ability = "Volley of Souls"
         elseif necrosisStacks >= 6 then
             ability = "Finger of Death"
