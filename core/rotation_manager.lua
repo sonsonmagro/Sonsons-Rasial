@@ -1,5 +1,5 @@
 ---@module 'rotation_manager'
----@version 1.0.1
+---@version 0.0.1
 
 local RotationManager = {}
 RotationManager.__index = RotationManager
@@ -7,7 +7,7 @@ RotationManager.__index = RotationManager
 local API = require("api")
 local Timer = require("core.timer")
 
-local debug = false
+local debug = true
 
 ---@class Step
 ---@field label string step name or action identifier
@@ -164,6 +164,7 @@ function RotationManager:execute()
                 end
             end
             self.debugLog(" ")
+
             -- execute timer
             self.timer:reset()
             self.timer.cooldown = step.wait
@@ -204,6 +205,7 @@ function RotationManager:execute()
                 return true
             elseif (step.type == "Ability") and step.replacementLabel then
                 self.debugLog("= Step type: Ability")
+                self.debugLog("=== Replacement Ability: "..step.replacementLabel)
                 if self:_useAbility(step.replacementLabel) then
                     self.debugLog("+ Ability cast successful")
                 else
@@ -244,6 +246,7 @@ function RotationManager:_improvise(spendAdren)
     local ability = "Basic<nbsp>Attack"
 
     self.debugLog("[IMPROV]: = Target Health:    "..targetHealth)
+    self.debugLog("[IMPROV]: = Adrenaline:       "..adren)
     self.debugLog("[IMPROV]: = Soul stacks:      "..soulStacks)
     self.debugLog("[IMPROV]: = Necrosis stacks:  "..necrosisStacks)
     self.debugLog("[IMPROV]: = Possible fingers: "..possibleFingers)
@@ -281,12 +284,12 @@ function RotationManager:_improvise(spendAdren)
             ability = "Finger of Death"
         elseif API.GetABs_name1("Command Putrid Zombie").enabled then
             ability = "Command Putrid Zombie"
-        elseif API.GetABs_name1("Command Skeleton Warrior").enabled and API.GetABs_name1("Command Skeleton Warrior").cooldown_timer <= 1 then
-            ability = "Command Skeleton Warrior"
         elseif API.GetABs_name1("Touch of Death").cooldown_timer <= 1 then
             ability = "Touch of Death"
         elseif API.GetABs_name1("Soul Sap").cooldown_timer <= 1 then
             ability = "Soul Sap"
+        elseif API.GetABs_name1("Command Skeleton Warrior").enabled and API.GetABs_name1("Command Skeleton Warrior").cooldown_timer <= 1 then
+            ability = "Command Skeleton Warrior"
         end
     end
 
