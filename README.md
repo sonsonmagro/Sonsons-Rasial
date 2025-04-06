@@ -1,4 +1,4 @@
-# Sonson's Rasial
+# [v1.0.2] Sonson's Rasial
 
 A comprehensive PvM script that demonstrates advanced use of my Lua libraries and script structuring for efficient combat automation.
 
