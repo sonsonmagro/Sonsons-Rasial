@@ -1,234 +1,314 @@
----@module 'rotation_manager'
----@version 0.0.1
+--- @module "Sonson's Rotation Manager"
+--- @version 0.0.1
+
+------------------------------------------
+--# IMPORTS
+------------------------------------------
+
+local API    = require("api")
+local Player = require("core.player")
+local Utils  = require("core.helper")
+
+------------------------------------------
+--# TYPE DEFINITIONS
+------------------------------------------
+
+--- @class Step
+--- @field label                 string                      Unique identifier for this step, used in logging and debugging.
+--- @field type?                 StepType                    The category of the step which determines how it is processed (e.g., "Ability", "Inventory", "Equip", "Target cycle", "Improvise", or "Custom").
+--- @field wait?                 number                      The post-execution delay. When useTicks is true, this is in game ticks (default is 3 ticks); otherwise in milliseconds (default is 1800 ms).
+--- @field useTicks?             boolean                     Determines if the wait value uses game ticks (true) or milliseconds (false). Default is true.
+--- @field action?               function                    The primary execution logic for the step. Required for non-Improvise steps that do not use default utility functions.
+--- @field style?                CombatStyle                 For Improvise steps, indicates the combat style to use (e.g., "Necromancy", "Melee", "Range", or "Magic").
+--- @field condition?            fun():boolean               A predicate function that must return true for the primary action to execute. If absent, the action is executed unconditionally.
+--- @field replacementLabel?     string                      Alternate display name for the action when the condition check fails.
+--- @field replacementAction?    function                    Alternate logic to execute when the condition function exists but evaluates to false.
+--- @field replacementWait?      number                      A custom delay to use after performing the replacement action.
+--- @field spend?                boolean                     For Improvise steps, indicates whether adrenaline and other resources should be consumed. Defaults to false.
+--- @field targetCycleKey?       number                      The hexadecimal key code used for target cycling actions (e.g., 0x09).
+
+--- @alias StepType
+--- | "Ability"
+--- | "Inventory"
+--- | "Equip"
+--- | "Target cycle"
+--- | "Improvise"
+--- | "Custom"
+
+--- @alias CombatStyle
+--- | "Necromancy"
+--- | "Melee"
+--- | "Range"
+--- | "Magic"
+
+--- @class RotationManager
+--- @field rotation              Step[]                      The list of steps that make up a rotation sequence.
+--- @field rotationAddress       string                      A unique string representation of the current rotation (used to detect changes).
+--- @field index                 integer                     The current position in the rotation sequence.
+--- @field targetId?             number                      The identifier of the target, if applicable.
+--- @field useTicks              boolean                     Indicates whether the step wait timings use game ticks.
+--- @field cooldown              number                      The current wait duration before the next step can be executed.
+--- @field lastTick              integer                     The game tick when the last step timer was started.
+--- @field lastTime              number                      The precise time (in milliseconds) when the last step timer was started.
+--- @field load                  fun(self, rotation: Step[]) Loads a new rotation and resets the index if the rotation is different.
+--- @field execute               fun(self): boolean          Processes and executes the current step in the rotation; returns true if a step was executed.
+
+------------------------------------------
+--# ROTATION STEP CONFIGURATION
+------------------------------------------
+
+--[[
+
+            ██████╗  ██████╗ ████████╗        ███████╗████████╗███████╗██████╗ ███████╗
+            ██╔══██╗██╔═══██╗╚══██╔══╝        ██╔════╝╚══██╔══╝██╔════╝██╔══██╗██╔════╝
+            ██████╔╝██║   ██║   ██║           ███████╗   ██║   █████╗  ██████╔╝███████╗
+            ██╔══██╗██║   ██║   ██║           ╚════██║   ██║   ██╔══╝  ██╔═══╝ ╚════██║
+            ██║  ██║╚██████╔╝   ██║██╗        ███████║   ██║   ███████╗██║     ███████║
+            ╚═╝  ╚═╝ ╚═════╝    ╚═╝╚═╝        ╚══════╝   ╚═╝   ╚══════╝╚═╝     ╚══════╝
+
+    E S S E N T I A L   S T E P   P A R A M E T E R S :
+    --------------------------------------------------------------------------------------------
+    • label             (string)  Unique identifier for the step (required)
+    • type              (string)  Step type - "Ability", "Inventory", "Equip", "Target cycle", "Improvise", or "Custom"
+    • action            (function) Primary execution logic (required for non-Improvise steps that do not use default utility functions)
+    • targetCycleKey    (number)  Hexadecimal key code for target cycling actions (e.g., 0x09)
+
+    S T E P   T I M I N G   P A R A M E T E R S :
+    --------------------------------------------------------------------------------------------
+    • wait              (number)  Delay after execution (default: 3 ticks if useTicks == true; otherwise 1800 ms)
+    • useTicks          (boolean) Use game ticks instead of milliseconds for wait (default: true)
+    • replacementWait   (number)  Custom wait period when a replacement action is used
+
+    C O N D I T I O N A L   E X E C U T I O N :
+    --------------------------------------------------------------------------------------------
+    • condition         (function) Predicate that must return true for the primary action to execute
+    • replacementLabel  (string)  Alternate display name for the action when the condition check fails
+    • replacementAction (function) Alternate logic to execute when condition exists but returns false
+
+    I M P R O V I S E - S P E C I F I C :
+    --------------------------------------------------------------------------------------------
+    • style             (string)  Combat style - "Necromancy", "Melee", "Range", or "Magic"
+    • spend             (boolean) Indicates whether adrenaline and other resources should be consumed (default: false)
+
+    E X E C U T I O N   R U L E S :
+    --------------------------------------------------------------------------------------------
+    1. If a condition exists and returns false, then:
+         - Execute replacementAction if provided, or
+         - Use replacementLabel for Ability-type steps, or
+         - Skip the step entirely if neither is provided.
+    2. All steps honor their wait period before proceeding to the next step.
+    3. Steps are processed sequentially in their declared order unless skipped.
+]]
+
+------------------------------------------
+--# CONSTANT VARIABLES
+------------------------------------------
+
+local CONSTANTS = {
+    BUFFS = {
+        SOULS = 30123,
+        NECROSIS = 30101,
+        DEATH_SPARK = 30127
+    },
+    DEBUFFS = {
+        DEATH_GRASP = 55524,
+    }
+}
+
+------------------------------------------
+--# INITIALIZATION
+------------------------------------------
 
 local RotationManager = {}
 RotationManager.__index = RotationManager
 
-local API = require("api")
-local Timer = require("core.timer")
 
-local debug = true
-
----@class Step
----@field label string step name or action identifier
----@field type string? step type ("Ability", "Inventory", "Custom", "Improvise")
----@field wait number? delay after execution (default: 3 ticks)
----@field useTicks boolean? use game ticks for wait (default: true)
----@field action function? custom action function
----@field style string? combat style to improvise in
----@field condition nil | fun():boolean whether to skip or use replacement instead of main step
----@field replacementLabel string?
----@field replacementAction function?
----@field replacementWait number?
----@field spend boolean? spend adrenaline when improvising
-
-
----@class RotationManager
----@field name string
----@field rotation Step[]
----@field index integer
----@field timer Timer
----@field trailing boolean
-function RotationManager.new(config)
+function RotationManager.new(targetId)
     local self = setmetatable({}, RotationManager)
-    self.improvising = false
-    self.trailing = false
-    self.name = config.name or "Unnamed Rotation"
-    self.rotation = config.rotation or {}
+    -- TODO: Allow for dynamic target selection
+    self.targetId = targetId or nil
+    if targetId then Utils:log("Target ID Initialized: " .. targetId) end
+
+    -- Rotation data
+    self.rotation, self.rotationAddress = {}, ""
     self.index = 1
-    self.timer = Timer.new({
-        name = (config.name or "Rotation").." Timer",
-        cooldown = 0,
-        useTicks = true,
-        condition = function() return true end,
-        action = function() return true end
-    })
+
+    -- Last step data
+    self.useTicks = true
+    self.cooldown = 0
+
+    -- Execution data
+    self.lastTick = 0
+    self.lastTime = 0
+
     return self
-end
-
-function RotationManager.debugLog(message)
-    if debug then
-        print("[ROTATION]: "..message)
-    end
-end
-
-function RotationManager:_formatTime()
-    local seconds = os.time()
-    local ms = math.floor((os.clock() % 1) * 1000)
-
-    local hour = math.floor(seconds / 3600) % 24
-    local minute = math.floor(seconds / 60) % 60
-    local second = seconds % 60
-
-    return string.format("%02d:%02d:%02d.%03d", hour, minute, second, ms)
-end
-
-function RotationManager:_useAbility(name)
-    local success = false
-    -- check it exists
-    if API.GetABs_name(name, false) then -- check if ability exists
-        if API.DoAction_Ability(name, 1, API.OFF_ACT_GeneralInterface_route, true) then
-            success = true
-        end
-    else
-        self.debugLog(string.format("Ability (%s) does not exist- Moving on.", name))
-        return true
-    end
-    return success
-end
-
----checks if the player has a specific buff
----@param buffId number
----@return {found: boolean, remaining: number}
-function RotationManager:getBuff(buffId)
-    local buff = API.Buffbar_GetIDstatus(buffId, false)
-    return {found = buff.found, remaining = (buff.found and API.Bbar_ConvToSeconds(buff)) or 0}
-end
-
----checks if the player has a specific debuff
----@param debuffId number
----@return Bbar
-function RotationManager:getDebuff(debuffId)
-    local debuff = API.DeBuffbar_GetIDstatus(debuffId, false)
-    return {found = debuff.found, remaining = (debuff.found and API.Bbar_ConvToSeconds(debuff)) or 0}
 end
 
 function RotationManager:_useInventory(itemName)
     return API.DoAction_Inventory3(itemName, 0, 1, API.OFF_ACT_GeneralInterface_route)
 end
 
+--- Loads a new rotation and resets the index
+--- @param rotaiton Step[]
+function RotationManager:load(rotaiton)
+    -- Check if rotation is different (failsafe: sorry Dead)
+    local rotationAddress = tostring(rotaiton)
+    if self.rotationAddress ~= rotationAddress then
+        Utils:log("Rotation loaded successfully")
+        Utils:log("Rotation address: " .. rotationAddress)
+        self.index = 1
+        self.rotation = rotaiton
+        self.rotationAddress = rotationAddress
+    end
+end
+
+--- Checks if the wait duration period has passed
+function RotationManager:_canTrigger()
+    if self.useTicks then
+        return (API.Get_tick() - self.lastTick) >= self.cooldown    -- Using game ticks
+    else
+        return (os.clock() * 1000 - self.lastTime) >= self.cooldown -- Using milliseconds
+    end
+end
+
+--- Starts the internal timer
+--- @param step Step: The current step being executed
+--- @param useReplacementWait? boolean: Whether to use the replacement wait time
+function RotationManager:_startTimer(step, useReplacementWait)
+    self.index = self.index + (step.type ~= "Improvise" and 1 or 0)
+    self.cooldown = useReplacementWait and step.replacementWait or step.wait
+    self.useTicks = step.useTicks
+    self.lastTick = API.Get_tick()
+    self.lastTime = os.clock() * 1000
+    -- Timer debugging
+    Utils:log("= Timer Information: ")
+    Utils:log("=== Last Tick: " .. self.lastTick)
+    Utils:log("=== Last Time: " .. self.lastTime)
+    Utils:log("=== Cooldown : " .. self.cooldown)
+    Utils:log("")
+end
+
 function RotationManager:execute()
-    -- do notion if we're out of steps
+    -- Do nothing if we're out of steps
     if self.index > #self.rotation then
-        self.debugLog("No more steps to "..self.name)
+        Utils:log("No more steps")
         return false
     end
 
-    -- can execute
-    if self.timer:canTrigger() then
-        -- get step
+    -- Check if the wait time has passed
+    if self:_canTrigger() then
+        -- Get step data
         local step = self.rotation[self.index]
-        self.debugLog("--# " .. self.index .. " -------------------------------------------")
-        self.debugLog("# " .. step.label)
-        self.debugLog("Tick: " .. API.Get_tick())
-        self.debugLog("Time: " .. math.floor(os.time() * 1000))
+        -- Step data debugging
+        Utils:log("--# " .. self.index .. " -------------------------------------------")
+        Utils:log("# " .. step.label)
+        Utils:log("Tick: " .. API.Get_tick())
+        Utils:log("Time: " .. math.floor(os.clock() * 1000))
 
-        -- configure step defaults:
-        step.type = step.type or "Ability"  -- type
-        if step.useTicks == nil then        -- useTicks
+        -- Configure step defaults
+        step.type = step.type or "Ability" -- type
+        if step.useTicks == nil then       -- useTicks
             step.useTicks = true
         end
         step.wait = step.wait or (step.useTicks and 3 or 1800)
-        self.debugLog("Wait: " .. step.wait)
-        self.debugLog("UseTicks?: " .. ((step.useTicks and "Yes") or "No"))
-        self.debugLog(" ")
+        -- Cooldown debugging
+        Utils:log("Wait: " .. step.wait)
+        Utils:log("UseTicks?: " .. ((step.useTicks and "Yes") or "No"))
+        Utils:log("")
 
-        -- check for condition and if they are met
+        -- Check for conditions and whether or not they are met
         if (step.condition and step.condition()) or not step.condition then
             if step.condition and step.condition() then
-                self.debugLog("+ Step condition found and met")
+                Utils:log("+ Step condition found and met")
             else
-                self.debugLog("= No step condition found")
+                Utils:log("= No step condition found")
             end
-            self.debugLog(" ")
-            -- handle step types
+            Utils:log("")
+            -- Handle step types
             if step.type == "Ability" then
-                self.debugLog("= Step type: Ability")
-                if self:_useAbility(step.label) then
-                    self.debugLog("+ Ability cast successful")
+                Utils:log("= Step type: Ability")
+                if Utils:useAbility(step.label) then
+                    Utils:log("+ Ability cast successful")
                 else
-                    self.debugLog("- Ability cast unsuccessful")
+                    Utils:log("- Ability cast unsuccessful")
                 end
+                Utils:log("")
             elseif step.type == "Inventory" then
-                self.debugLog("= Step type: Inventory")
+                Utils:log("= Step type: Inventory")
                 if self:_useInventory(step.label) then
-                    self.debugLog("+ Use from inventory successful")
+                    Utils:log("+ Use from inventory successful")
                 else
-                    self.debugLog("- Use from inventory unsuccessful")
+                    Utils:log("- Use from inventory unsuccessful")
                 end
-            elseif step.type == "Custom" and step.action then
-                self.debugLog("= Step type: Custom")
-                if step.action() then
-                    self.debugLog("+ Custom action executed successfully")
+                Utils:log("")
+            elseif step.type == "Equip" then
+                Utils:log("= Step type: Equip")
+                if Inventory:Equip(step.label) then
+                    Utils:log("+ Equipping from inventory successful")
                 else
-                    self.debugLog("- Custom action was not successful")
+                    Utils:log("- Equipping from inventory unsuccessful")
+                end
+                Utils:log("")
+            elseif step.type == "Custom" and step.action then
+                Utils:log("= Step type: Custom")
+                if step.action() then
+                    Utils:log("+ Custom action executed successfully")
+                else
+                    Utils:log("- Custom action was not successful")
                 end
             elseif step.type == "Improvise" and step.style == "Necromancy" then
-                self.debugLog("= Step type: Improvise")
-                local ability = self:_improvise(step.spend)
-                self.debugLog("= Designated improvise ability: "..ability)
-                if self:_useAbility(ability) then
-                    self.debugLog("+ Ability cast was successful")
+                Utils:log("= Step type: Improvise")
+                Utils:log("")
+                local ability = self:_improvise(step.style, step.spend, self.targetId)
+                Utils:log("= Designated improvise ability: " .. ability)
+                if Utils:useAbility(ability) then
+                    Utils:log("+ Ability cast was successful")
                 else
-                    self.debugLog("- Ability cast was unsuccessful")
+                    Utils:log("- Ability cast was unsuccessful")
                 end
+                Utils:log("")
+            elseif step.type == "Target cycle" then
+                Utils:log("= Step type: Target cycle")
+                API.KeyboardPress2(step.targetCycleKey, 60, 0)
+                Utils:log("+ Target cycled")
+                Utils:log("")
             end
-            self.debugLog(" ")
 
-            -- execute timer
-            self.timer:reset()
-            self.timer.cooldown = step.wait
-            self.timer.useTicks = step.useTicks
-            self.timer:execute()
-            self.index = self.index + (step.type ~= "Improvise" and 1 or 0)
-            self.debugLog("= Timer Data: ")
-            self.debugLog("=== Last Triggered: "..self.timer.lastTriggered)
-            self.debugLog("=== Last Time     : "..self.timer.lastTime)
-            self.debugLog("=== Cooldown      : "..self.timer.cooldown)
-            self.debugLog(" ")
+            -- Start timer
+            self:_startTimer(step)
             return true
         else
-            self.debugLog("- Step condition found and NOT met")
-            -- use replacements
+            Utils:log("- Step condition found and NOT met")
+            -- Use replacements
             if step.replacementAction then
                 if step.replacementLabel then
                     step.label = step.replacementLabel
                 end
                 if step.replacementAction() then
-                    self.debugLog("+ Replacement action executed successfully")
+                    Utils:log("+ Replacement action executed successfully\n")
                 else
-                    self.debugLog("- Replacement action was not executed successfully")
+                    Utils:log("- Replacement action was not executed successfully\n")
                 end
-                self.debugLog(" ")
 
-                -- execute timer
-                self.timer:reset()
-                self.timer.cooldown = step.replacementWait or step.wait
-                self.timer.useTicks = step.useTicks
-                self.timer:execute()
-                self.index = self.index + 1
-                self.debugLog("= Timer Data: ")
-                self.debugLog("=== Last Triggered: "..self.timer.lastTriggered)
-                self.debugLog("=== Last Time     : "..self.timer.lastTime)
-                self.debugLog("=== Cooldown      : "..self.timer.cooldown)
-                self.debugLog(" ")
+                -- Start timer
+                self:_startTimer(step, true)
                 return true
             elseif (step.type == "Ability") and step.replacementLabel then
-                self.debugLog("= Step type: Ability")
-                self.debugLog("=== Replacement Ability: "..step.replacementLabel)
-                if self:_useAbility(step.replacementLabel) then
-                    self.debugLog("+ Ability cast successful")
+                Utils:log("= Step type: Ability")
+                Utils:log("=== Replacement Ability: " .. step.replacementLabel)
+                if Utils:useAbility(step.replacementLabel) then
+                    Utils:log("+ Ability cast successful\n")
                 else
-                    self.debugLog("- Ability cast unsuccessful")
+                    Utils:log("- Ability cast unsuccessful\n")
                 end
-                self.debugLog(" ")
 
-                -- execute timer
-                self.timer:reset()
-                self.timer.cooldown = step.replacementWait or step.wait
-                self.timer.useTicks = step.useTicks
-                self.timer:execute()
-                self.index = self.index + 1
-                self.debugLog("= Timer Data: ")
-                self.debugLog("=== Last Triggered: "..self.timer.lastTriggered)
-                self.debugLog("=== Last Time     : "..self.timer.lastTime)
-                self.debugLog("=== Cooldown      : "..self.timer.cooldown)
-                self.debugLog(" ")
+                -- Start timer
+                self:_startTimer(step)
                 return true
             else
-                self.debugLog("= Skipping step")
-                self.timer:reset()
-                self.timer.cooldown = 0
+                -- Skip this step
+                Utils:log("= Skipping step")
+                self.cooldown = 0
                 self.index = self.index + 1
                 return false
             end
@@ -238,68 +318,123 @@ function RotationManager:execute()
     return false
 end
 
-function RotationManager:_improvise(spend)
-    local targetHealth, adren = API.ReadTargetInfo(true).Hitpoints, tonumber(API.GetAdrenalineFromInterface())
-    local soulStacks = self:getBuff(30123).found and self:getBuff(30123).remaining or 0
-    local necrosisStacks = self:getBuff(30101).found and self:getBuff(30101).remaining or 0
-    local possibleFingers = math.floor((adren + necrosisStacks*10) / 60)
-    local ability = "Basic<nbsp>Attack"
-
-    self.debugLog("[IMPROV]: = Target Health:    "..targetHealth)
-    self.debugLog("[IMPROV]: = Adrenaline:       "..adren)
-    self.debugLog("[IMPROV]: = Soul stacks:      "..soulStacks)
-    self.debugLog("[IMPROV]: = Necrosis stacks:  "..necrosisStacks)
-    self.debugLog("[IMPROV]: = Possible fingers: "..possibleFingers)
-
-    local canExecute = false
-    if (targetHealth - 30000) <= ((soulStacks*7000) + possibleFingers*15000) then canExecute = true end
-    self.debugLog("[IMPROV]: ".. (canExecute and "+ Target is within execute range" or "- Target is not within execute range"))
-
-    -- execution checks
-    -- volley into finger
-    if (soulStacks >= 3) and (possibleFingers >= 1) and (targetHealth - 30000 <= (soulStacks * 8000) + 13000) then
-        ability = "Volley of Souls"
-    -- fingers of death
-    else
-        if targetHealth - 30000 <= possibleFingers * 13000 then
-            ability = "Finger of Death"
-        end
+--- Improvises the next ability in the rotaiton
+--- @param style string The combat style to improvise in
+--- @param spendResources boolean Whether or not resources should be spent
+--- @param targetId integer The AllObject Identifier of the target
+--- @return string
+function RotationManager:_improvise(style, spendResources, targetId)
+    -- Determine target (prioritize target info)
+    local target = Utils:find(targetId, 1, 20) or nil
+    local targetHealth = 0
+    if API.ReadTargetInfo99(true).Hitpoints > 0 then
+        targetHealth = API.ReadTargetInfo99(true).Hitpoints
+    elseif target then
+        targetHealth = target.Life
     end
 
-    -- equips salve amulet (e) if in inventory
-    if Inventory:GetItem("Salve amulet (e)") then Inventory:Equip("Salve amulet (e)") end
+    local adrenaline = Player:getAdrenaline()
+    local ability = ""
 
-    -- if no execute, use basic rotation
-    if ability == "Basic<nbsp>Attack" then
-        if spend and not self:getDebuff(55524).found and Inventory:GetItem("Essence of Finality") and (adren > 23) then
-            Inventory:Equip("Essence of Finality")
-            API.RandomSleep2(60, 40, 20)
-            ability = "Essence of Finality"
-        elseif spend and (adren - necrosisStacks*10) > 46 then
-            ability = "Finger of Death"
-        elseif soulStacks == 5 then
-            ability = "Volley of Souls"
-        elseif necrosisStacks >= 6 then
-            ability = "Finger of Death"
-        elseif API.GetABs_name1("Command Putrid Zombie").enabled then
-            ability = "Command Putrid Zombie"
-        elseif API.GetABs_name1("Touch of Death").cooldown_timer <= 1 then
-            ability = "Touch of Death"
-        elseif API.GetABs_name1("Soul Sap").cooldown_timer <= 1 then
-            ability = "Soul Sap"
-        elseif API.GetABs_name1("Command Skeleton Warrior").enabled and API.GetABs_name1("Command Skeleton Warrior").cooldown_timer <= 1 then
-            ability = "Command Skeleton Warrior"
+    --#region Necromancy improvisation
+    if style == "Necromancy" then
+        -- Define default ability
+        ability = "Basic<nbsp>Attack"
+
+        -- Get resources
+        local souls = Player:getBuff(CONSTANTS.BUFFS.SOULS)
+        local necrosis = Player:getBuff(CONSTANTS.BUFFS.NECROSIS)
+
+        local soulStacks = (souls.found and souls.remaining > 3) and souls.remaining or 0
+        local necrosisStacks = (necrosis.found and necrosis.remaining) or 0
+
+        local possibleFingers = math.floor((adrenaline + necrosisStacks * 10) / 60)
+
+        -- Improvisation debugging
+        Utils:log("[IMPROV] Target Health:    " .. targetHealth)
+        Utils:log("[IMPROV] Adrenaline:       " .. adrenaline)
+        Utils:log("[IMPROV] Soul stacks:      " .. soulStacks)
+        Utils:log("[IMPROV] Necrosis stacks:  " .. necrosisStacks)
+        Utils:log("[IMPROV] Possible fingers: " .. possibleFingers)
+        Utils:log("")
+
+        if targetHealth > 30000 then
+            local canExecute = (targetHealth - 30000) <= ((soulStacks * 7000) + possibleFingers * 14000)
+            Utils:log("[IMPROV] " ..
+                (canExecute and "+ Target is within execute range" or "- Target is not within execute range"))
+            -- Checks if the target can be executed
+            -- Volley + Finger damage check
+            if (soulStacks >= 3) and (possibleFingers >= 1) and (targetHealth - 30000 <= (soulStacks * 7000) + 14000) then
+                ability = "Volley of Souls"
+                -- Finger(s) of Death damage check
+            elseif targetHealth - 30000 <= possibleFingers * 14000 then
+                ability = "Finger of Death"
+            end
+        end
+
+        -- If target is not within execute range, use these conditions to evaluate next ability
+        if ability == "Basic<nbsp>Attack" then
+            -- Are we spending our resources?
+            if spendResources then
+                if not Player:getDebuff(CONSTANTS.DEBUFFS.DEATH_GRASP).found and (#Inventory:GetItem("Essence of Finality") > 0)
+                    and (adrenaline > 23)
+                then
+                    Inventory:Equip("Essence of Finality")
+                    --API.RandomSleep2(60, 40, 20)
+                    ability = "Essence of Finality"
+                    goto continue
+                else
+                    -- Equip salve (e) if found in the player's inventory
+                    if #Inventory:GetItem("Salve amulet (e)") > 0 then
+                        Inventory:Equip("Salve amulet (e)")
+                    end
+                end
+                if possibleFingers > 0 then
+                    ability = "Finger of Death"
+                    goto continue
+                end
+            end
+            -- Guess not...
+            if Player:getBuff(34177).found and Utils:canUseAbility("Command Putrid Zombie") then
+                ability = "Command Putrid Zombie"
+                goto continue
+            end
+            if Player:getBuff(34179).found and Utils:canUseAbility("Command Skeleton Warrior") then
+                ability = "Command Skeleton Warrior"
+                goto continue
+            end
+            if spendResources and (soulStacks == 5) then
+                ability = "Volley of Souls"
+                goto continue
+            end
+            if necrosisStacks >= (spendResources and 6 or 12) then
+                ability = "Finger of Death"
+                goto continue
+            end
+            if Player:getBuff(CONSTANTS.BUFFS.DEATH_SPARK).found then
+                goto continue
+            end
+            if Utils:canUseAbility("Touch of Death") then
+                ability = "Touch of Death"
+                goto continue
+            end
+            if Utils:canUseAbility("Soul Sap") then
+                ability = "Soul Sap"
+                goto continue
+            end
         end
     end
 
     ::continue::
     return ability
+    --#endregion
 end
 
-function RotationManager:reset()
+-- Reset
+function RotationManager:unload()
+    self.rotation = {}
+    self.rotationAddress = ""
     self.index = 1
-    self.improvising = false
-    self.timer:reset()
 end
 
 return RotationManager
