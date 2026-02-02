@@ -1,162 +1,233 @@
----@version 1.2.2
---[[
-    File: player_manager.lua
-    Description: Manage your player's state from one dynamic instance
-    Author: Sonson
+--- @module "Sonson's Player Manager"
+--- @version 2.0.0.0
 
-    TODO:
-    - Add player_manager features
-        - Summoning Management
-        - Aura Management
+------------------------------------------
+--# CHANGELOG
+------------------------------------------
+--[[
+    Version 2.0.0.0 - Buff Management Overhaul
+    ------------------------------------------
+
+    BREAKING CHANGES:
+    • Renamed `manageBuffs()` to `setBuffConfig()` - update all call sites
+    • Renamed `managedBuffsTracking()` to `buffConfigTracking()`
+    • Removed `self.buffs.managed` table (was unused functionally)
+    • Removed `self.buffs.assigned` - replaced with `self.buffs.config`
+
+    NEW FEATURES:
+    • Per-buff cooldowns: Each buff now has its own cooldown timer instead of
+      a shared global cooldown. This allows multiple buffs to be applied in
+      quick succession without blocking each other.
+
+    • Failure tracking: Buffs that fail to apply are tracked. After 5
+      consecutive failures, the system stops retrying and logs a warning.
+      Failures reset on successful application.
+
+    • Priority support: Buffs can now have a `priority` field. Higher priority
+      buffs are processed first. Default priority is 0.
+
+    • New tracking function: `buffFailuresTracking()` shows which buffs have
+      failed and how many times.
+
+    IMPROVED:
+    • Toggle buff cleanup logic is now clearer with dedicated
+      `_deactivateToggleBuff()` function
+    • `buffConfigTracking()` now shows active status, type, and priority
+    • Better separation of concerns in helper functions
+
+    DATA STRUCTURE CHANGES:
+    Old:
+        self.buffs = {
+            managed = {},   -- Removed (was unused)
+            assigned = {},  -- Renamed to 'config'
+            toggle = {}
+        }
+
+    New:
+        self.buffs = {
+            config = {},      -- Buff definitions to manage
+            active = {},      -- Quick lookup of active buff IDs
+            toggle = {},      -- Toggle buffs currently on
+            failures = {},    -- Failed application counts per buff
+            timestamps = {}   -- Per-buff cooldown tracking
+        }
+
+    FUNCTION RENAMES:
+        manageBuffs()                    → setBuffConfig()
+        _processAssignedBuff()           → _processBuff()
+        _handleInactiveBuff()            → _applyBuff()
+        _cleanupUnmanagedToggleBuffs()   → _cleanupRemovedToggleBuffs()
+        _addToTableIfNotExists()         → _addToToggleIfNeeded()
+        managedBuffsTracking()           → buffConfigTracking()
+
+    NEW FUNCTIONS:
+        _canAttemptBuff(buffId)          - Per-buff cooldown check
+        _deactivateToggleBuff(buff)      - Explicitly deactivate a toggle buff
+        buffFailuresTracking()           - Track buff application failures
+
+    REMOVED FUNCTIONS:
+        _createAssignedIdsLookup()       - Logic inlined where needed
+        _handleActiveBuff()              - Merged into _processBuff()
 ]]
 
-local debug = false
+------------------------------------------
+--# IMPORTS
+------------------------------------------
 
----@class PlayerManager
----@field config PlayerManagerConfig
----@field state PlayerState
----@field inventory PMInventory
----@field buffs BuffCategory
----@field timestamp Cooldowns
-local PlayerManager = {}
+local API             = require("api")
+local Player          = require("core.player")
+local Utils           = require("core.helper")
+
+------------------------------------------
+--# TYPE DEFINITIONS
+------------------------------------------
+
+--- @class PlayerManagerConfig
+--- @field health?                          HealthThreshold                                             Configuration for managing health thresholds
+--- @field prayer?                          PrayerThreshold                                             Configuration for managing prayer thresholds
+--- @field interval?                        integer                                                     The duration in which to wait before re-attempting an action
+--- @field excaliburHealAction?             '1' | '2'                                                   1 for default behavior
+--- @field debug?                           boolean                                                     True to show debugging
+
+--- @class PrayerThreshold
+--- @field normal?                          Threshold                                                   The standard threshold to maintain
+--- @field critical?                        Threshold                                                   The critical threshold that triggers emergency actions if no items are available
+--- @field special?                         Threshold                                                   The threshold that activates special items like Enhanced Excalibur or Ancient Elven Ritual Shard
+
+--- @class HealthThreshold
+--- @field solid?                           Threshold                                                   The threshold for solid food items
+--- @field jellyfish?                       Threshold                                                   The threshold for jellyfish items
+--- @field healingPotion?                   Threshold                                                   The threshold for drinkable healing items
+--- @field special?                         Threshold                                                   The threshold that activates special items like Enhanced Excalibur or Ancient Elven Ritual Shard
+
+--- @class Threshold
+--- @field type                             "fixed" | "percent"                                         Specifies whether the threshold is based on a fixed value or a percentage
+--- @field value                            integer                                                     The minimum value that triggers the threshold
+
+--- @class PMInventoryItem
+--- @field name                             string                                                      The name of the inventory item
+--- @field id                               number                                                      The unique identifier for the item
+--- @field type                             string                                                      The category of the item (e.g., "food", "prayer")
+--- @field count                            number                                                      The quantity of the item in the inventory
+
+--- @class PMInventory
+--- @field food                             PMInventoryItem[]                                           A list of food items in the inventory
+--- @field prayer                           PMInventoryItem[]                                           A list of prayer-related items in the inventory
+
+--- @class Timestamps
+--- @field eat                              number                                                      The last tick when food was consumed
+--- @field drink                            number                                                      The last tick when a prayer item was consumed
+--- @field buff                             number                                                      The last tick when a buff was applied
+--- @field excal                            number                                                      The last tick when Enhanced Excalibur was used
+--- @field shard                            number                                                      The last tick when the Ancient Elven Ritual Shard was used
+--- @field tele                             number                                                      The last tick when an emergency teleport was triggered
+
+--- @class Buff
+--- @field buffName                         string                                                      The name of the buff
+--- @field buffId                           number                                                      The unique identifier for the buff
+--- @field execute                          fun():boolean                                               A function to activate the buff
+--- @field canApply?                        boolean | fun(self):boolean                                 Determines if the buff can be applied (boolean or function)
+--- @field toggle?                          boolean                                                     Indicates if the buff is toggleable
+--- @field refreshAt?                       number                                                      The remaining time at which the buff should be refreshed
+--- @field priority?                        number                                                      Higher priority buffs are processed first (default: 0)
+
+--- @class BuffState
+--- @field config                           Buff[]                                                      The buff definitions to manage
+--- @field active                           table<number, boolean>                                      Quick lookup of currently active buff IDs
+--- @field toggle                           Buff[]                                                      A list of toggleable buffs that are currently on
+--- @field failures                         table<number, number>                                       Track failed applications { [buffId] = attemptCount }
+--- @field timestamps                       table<number, number>                                       Per-buff cooldown tracking { [buffId] = lastAttemptTick }
+
+--- @class PlayerManager
+--- @field debug                            boolean                                                     Whether debug mode is enabled
+--- @field config                           PlayerManagerConfig                                         Configuration settings for the Player Manager
+--- @field inventory                        PMInventory                                                 The player's inventory categorized by item type
+--- @field buffs                            BuffState                                                   Buffs managed by the Player Manager
+--- @field timestamps                       Timestamps                                                  Timestamps for the last actions performed
+--- Core methods
+--- @field update                           fun(self)                                                   Updates the player manager's state and inventory
+--- @field manageHealth                     fun(self)                                                   Manages the player's health and maintains it above the defined normal threshold
+--- @field useExcalibur                     fun(self):boolean                                           Uses Enhanced Excalibur if found
+--- @field oneTickEat                       fun(self):boolean                                           Eats food in one tick (Solid -> Jellyfish -> Potion) FIXME: Wrong parameters
+--- @field managePrayer                     fun(self)                                                   Manages the player's prayer points and maintains it above the defined normal threshold
+--- @field useElvenShard                    fun(self):boolean                                           Uses Ancient Elven Ritual Shard if found
+--- @field drink                            fun(self, potionId?: integer):boolean                       Drinks a potion if an ID is provided or will consume the first prayer restoring potion otherwise
+--- @field dontDrink                        fun(self, ticks: number)                                    Sets a cooldown for drinking potions
+--- @field setBuffConfig                    fun(self, buffs: Buff[])                                    Sets which buffs should be managed (sorts by priority)
+--- Metrics
+--- @field stateTracking                    fun(self):table                                             Returns tracking metrics for the player's state
+--- @field foodItemsTracking                fun(self):table                                             Returns tracking metrics for food items
+--- @field prayerItemsTracking              fun(self):table                                             Returns tracking metrics for prayer items
+--- @field buffConfigTracking               fun(self):table                                             Returns tracking metrics for configured buffs
+--- @field toggleBuffsTracking              fun(self):table                                             Returns tracking metrics for toggleable buffs
+--- @field activeBuffsTracking              fun(self):table                                             Returns tracking metrics for active buffs
+--- @field buffFailuresTracking             fun(self):table                                             Returns tracking metrics for buff application failures
+--- Private methods
+--- @field _processInventory                fun(self)                                                   Scans the player's inventory and categorizes items
+--- @field _filterFoodItems                 fun(self, type: string):PMInventoryItem[]                   Retrieves all food items of a specific type
+--- @field _checkThreshold                  fun(self, resource: string, thresholdType: string):boolean  Checks if a resource threshold has been reached
+--- @field _emergencyTeleport               fun(self, name?: string, critical?: string)                 Teleports in case of an emergency
+--- @field _eat                             fun(self, type: string):boolean                             Eats the first type of food found
+--- @field _checkCooldown                   fun(self, timestamp: integer):boolean                       Checks if an action can be performed based on cooldown
+--- @field _canAttemptBuff                  fun(self, buffId: number):boolean                           Checks if enough time has passed to attempt applying a buff
+--- @field _isBuffInTable                   fun(self, buffTable: Buff[], buffId: number):boolean        Checks if a buff ID exists in a given buff table
+--- @field _addToToggleIfNeeded             fun(self, buff: Buff)                                       Adds a buff to the toggle list if it's a toggle buff
+--- @field _canApplyBuff                    fun(self, buff: Buff):boolean                               Determines if a buff can be applied
+--- @field _processBuff                     fun(self, buff: Buff)                                       Processes a buff, applying it if needed
+--- @field _applyBuff                       fun(self, buff: Buff):boolean                               Attempts to apply a buff with failure tracking
+--- @field _deactivateToggleBuff            fun(self, buff: Buff):boolean                               Deactivates a toggle buff that's no longer in config
+--- @field _cleanupRemovedToggleBuffs       fun(self)                                                   Cleans up toggle buffs that are no longer in config
+
+------------------------------------------
+--# INITIALIZATION
+------------------------------------------
+
+local PlayerManager   = {}
 PlayerManager.__index = PlayerManager
 
---#region luacats annotation
+-- Singleton instance
+local instance        = nil
 
----@class PlayerManagerConfig
----@field health ThresholdSettings
----@field prayer ThresholdSettings
----@field statuses Status[]?
----@field locations Location[]
-
----@class ThresholdSettings
----@field normal Threshold
----@field critical Threshold
----@field special Threshold
-
----@class Threshold
----@field type ThresholdType
----@field value number
-
----@alias ThresholdType "percent" | "current"
-
----@class Stat
----@field current number
----@field max number
----@field percent number
-
----@class Location
----@field name string
----@field coords {x: number, y: number, range: number, z?:number}?
----@field detector function?
-
----@class Status
----@field name string
----@field priority number?
----@field condition fun(self): boolean
----@field execute fun(self)
-
----@class PMInventoryItem
----@field name string
----@field id number
----@field type string
----@field count number
-
----@class PMInventory
----@field food PMInventoryItem[]
----@field prayer PMInventoryItem[]
-
----@class Cooldowns
----@field eat number
----@field drink number
----@field buff number
----@field excal number
----@field shard number
----@field tele number
-
----@class Buff
----@field buffName string
----@field buffId number
----@field execute fun(): boolean
----@field canApply nil | boolean | fun(self):boolean
----@field toggle boolean?
----@field refreshAt number?
-
----@class BuffCategory
----@field managed ManagedBuff[]
----@field toggle ManagedBuff[]
-
----@class ManagedBuff
----@field buffName string
----@field buffId number
----@field remaining number
----@field execute fun(): boolean
----@field canApply nil | boolean | fun(self):boolean
-
----@class PlayerState
----@field health Stat
----@field prayer Stat
----@field adrenaline number
----@field location string
----@field orientation number
----@field status string
----@field coords WPOINT
----@field animation number
----@field moving boolean
----@field inCombat boolean
-
----@class FamiliarState
----@field name string
----@field id number
----@field remaining number seconds
----@field hasScrolls boolean
----@field scrollCount number?
-
---#endregion
-
-local API = require("api")
-local BUFF_INTERVAL_CHECK = 2
-
---#region initialize PlayerManager
-
----initialize a new PlayerManager instance
----@param config PlayerManagerConfig
----@return PlayerManager
+--- Start a new instance or return an existing instance
+--- @param config? PlayerManagerConfig
+--- @return PlayerManager
 function PlayerManager.new(config)
+    if instance then
+        return instance
+    end
+
+    -- Create a new instance if none exists
+    --- @type PlayerManager
     local self = setmetatable({}, PlayerManager)
+    Utils:log("Initializing Player Manager instance", "info")
 
-    -- initialize config
-    self.config = config or {
-        health = {
-            normal = { type = "percent", value = 50 },
-            critical = { type = "percent", value = 25 },
-            special = { type = "percent", value = 75 } -- Excalibur threshold
-        },
-        prayer = {
-            normal = { type = "current", value = 200 },
-            critical = { type = "percent", value = 10 },
-            special = { type = "current", value = 600 } -- Shard threshold
-        },
-        locations = {}
+    -- Add defaults to config if not provided or partially missing
+    self.config = {}
+    Utils:log((config and "Config was found") or "No config was found")
+    config = config or {}
+
+    self.config.health = {
+        solid         = (config and config.health and config.health.solid) or { type = "fixed", value = 100 },
+        jellyfish     = (config and config.health and config.health.jellyfish) or { type = "percent", value = 70 },
+        healingPotion = (config and config.health and config.health.healingPotion) or { type = "percent", value = 30 },
+        special       = (config and config.health and config.health.special) or
+            { type = "percent", value = 40 } -- Enhanced Excalibur threshold
     }
-
-
-    -- initialize player state
-    self.state = {
-        health = { current = 0, max = 0, percent = 0 },
-        prayer = { current = 0, max = 0, percent = 0 },
-        adrenaline = 0,
-        location = "UNKNOWN",
-        orientation = 999,
-        status = "Idle",
-        coords = { x = 0, y = 0, z = 0 },
-        animation = -1,
-        moving = false,
-        inCombat = false
+    self.config.prayer = {
+        normal   = (config and config.prayer and config.prayer.normal) or { type = "fixed", value = 200 },
+        critical = (config and config.prayer and config.prayer.critical) or { type = "percent", value = 10 },
+        special  = (config and config.prayer and config.prayer.special) or
+            { type = "fixed", value = 600 } -- Ancient elven ritual shard threshold
     }
+    self.config.excaliburHealAction = (config and config.excaliburHealAction) or '1'
+    self.config.interval = (config and config.interval) or 1
 
-    -- initialize timestamps
-    self.timestamp = {
+    Utils:log("Solid: " .. self.config.health.solid.value)
+    Utils:log("Jellyfish: " .. self.config.health.jellyfish.value)
+    Utils:log("Potion: " .. self.config.health.healingPotion.value)
+
+    -- Timestamps of the last ticks in which the actions were used
+    self.timestamps = {
         eat = 0,
         drink = 0,
         buff = 0,
@@ -165,131 +236,247 @@ function PlayerManager.new(config)
         tele = 0
     }
 
+    -- Contains information regarding inventory items
     self.inventory = {
         food = {},
         prayer = {}
     }
 
+    -- Contains information regarding the player's managed buffs
     self.buffs = {
-        managed = {},
-        toggle = {}
+        config = {},    -- The buff definitions to manage
+        active = {},    -- Quick lookup of currently active buff IDs
+        toggle = {},    -- Toggle buffs that are currently on
+        failures = {},  -- Track failed applications { [buffId] = attemptCount }
+        timestamps = {} -- Per-buff cooldown tracking { [buffId] = lastAttemptTick }
     }
 
-    return self
+    -- Default debug values
+    self.debug = self.config.debug or false
+
+    instance = self
+    return instance
 end
 
---#endregion
+------------------------------------------
+--# CORE FUNCTIONALITY
+------------------------------------------
 
---#region PlayerState methods
+--- Updates player manager data
+function PlayerManager:update()
+    self:_processInventory() -- get the inventory items
+    self:_handleBuffs()
+end
 
-function PlayerManager.debugLog(message)
-    if debug then
-        print(
-            "[PLAYER MANAGER]:",
-            message
-        )
+--- Handles the player's health and maintains it above the defined normal threshold
+function PlayerManager:manageHealth()
+    -- Check to see if any thresholds are met
+    local solidFoodThreshold     = self:_checkThreshold("health", "solid")
+    local jellyfishThreshold     = self:_checkThreshold("health", "jellyfish")
+    local healingPotionThreshold = self:_checkThreshold("health", "healingPotion")
+    local specialThreshold       = self:_checkThreshold("health", "special")
+
+    -- Execute actions according to reached threhsolds
+    if specialThreshold then self:useExcalibur() end
+    if (solidFoodThreshold or jellyfishThreshold or healingPotionThreshold) and (#self.inventory.food > 0) then
+        self:oneTickEat(solidFoodThreshold, jellyfishThreshold, healingPotionThreshold)
+        return
+    end
+
+    -- Uses emergency teleport if out of food and critical threshold is met
+    if (solidFoodThreshold or jellyfishThreshold or healingPotionThreshold) and (#self.inventory.food == 0) then
+        Utils:log("Emergency teleport triggered (HEALTH)", "warn")
+        self:_emergencyTeleport("War's Retreat Teleport", "health")
     end
 end
 
----determines your location based on dynamic and static information
----@private
----@return string
-function PlayerManager:_determineLocation()
-    for _, loc in ipairs(self.config.locations) do
-        ---@diagnostic disable-next-line
-        if loc.coords and API.PInArea(loc.coords.x, loc.coords.range, loc.coords.y, loc.coords.range) then
-            return loc.name
-        end
-        if loc.detector and loc.detector() then
-            return loc.name
-        end
-    end
-    return "UNKNOWN"
-end
-
---determines the direction the prayer is facing
-function PlayerManager:_determineOrientation()
-    local orientation = math.floor(API.calculatePlayerOrientation()) % 360
-    return orientation
-end
-
----make stat
----@param current number
----@param max number
----@return Stat
-function PlayerManager:_createStat(current, max)
-    return {
-        current = current,
-        max = max,
-        percent = max > 0 and math.floor((current / max) * 100) or 0
-    }
-end
-
-function PlayerManager:_teleportToWars()
+--- Uses Enhanced Excalibur if found
+--- @return boolean
+function PlayerManager:useExcalibur()
     local currentTick = API.Get_tick()
-    if currentTick - self.timestamp.tele < 10 then
-        return API.DoAction_Ability("War's Retreat Teleport", 0, 1, API.OFF_ACT_GeneralInterface_route)
+    local excaliburIds = { 14632, 36619 }
+    local excaliburAction = tonumber(self.config.excaliburHealAction) or 1
+
+    -- Exits the funciton if action is on cooldown or debuff is found
+    if not (self:_checkCooldown(self.timestamps.excal))
+        or Player:getDebuff(14632).found
+    then
+        return false
+    end
+
+    for _, id in ipairs(excaliburIds) do
+        -- Use from inventory
+        if Inventory:Contains(id) then
+            if Inventory:DoAction(id, excaliburAction, API.OFF_ACT_GeneralInterface_route) then
+                self.timestamps.excal = currentTick
+                return true
+            end
+        end
+        -- Use from off-hand
+        if Equipment:GetOffhand().id == id then
+            ---@diagnostic disable-next-line
+            if Equipment:DoAction(id, excaliburAction + 1) then
+                self.timestamps.excal = currentTick
+                return true
+            end
+        end
+    end
+    return false
+end
+
+--- Eats all food in one tick
+--- @param solidFoodThreshold boolean: Whether to eat solid food items
+--- @param jellyfishThreshold boolean: Whether to eat jellyfish items
+--- @param healingPotionThreshold boolean: Whether to drink healing potions
+--- @return boolean: Whether the player attempted to restore health
+function PlayerManager:oneTickEat(solidFoodThreshold, jellyfishThreshold, healingPotionThreshold)
+    local currentTick = API.Get_tick()
+    -- Check if action was recently executed
+    if not self:_checkCooldown(self.timestamps.eat) then
+        return false
+    end
+
+    local success = false
+    if solidFoodThreshold then
+        if #self:_filterFoodItems("food") > 0 then
+            if self:_eat("food") then
+                self.timestamps.eat = currentTick
+                success = true
+            end
+        end
+    end
+    if jellyfishThreshold then
+        if #self:_filterFoodItems("jellyfish") > 0 then
+            if self:_eat("jellyfish") then
+                self.timestamps.eat = currentTick
+                success = true
+            end
+        end
+    end
+    -- Check if action was recently executed
+    if not self:_checkCooldown(self.timestamps.drink) then return false end
+    if healingPotionThreshold then
+        if #self:_filterFoodItems("potion") > 0 then
+            if self:_eat("potion") then
+                self.timestamps.eat = currentTick
+                success = true
+            end
+        end
+    end
+    return success
+end
+
+--- Manages the player's prayer points and maintains it above the deined normal threshold
+function PlayerManager:managePrayer()
+    -- Checks to see if any thresholds are met
+    local normalThreshold   = self:_checkThreshold("prayer", "normal")
+    local criticalThreshold = self:_checkThreshold("prayer", "critical")
+    local specialThreshold  = self:_checkThreshold("prayer", "special")
+
+    -- Execute actions according to reached thresholds
+    if specialThreshold then self:useElvenShard() end
+    if normalThreshold and #self.inventory.prayer > 0 then
+        self:drink()
+        return
+    end
+
+    -- Uses emergency teleport if out of prayer items and critical threshold is met
+    if criticalThreshold and #self.inventory.prayer == 0 then
+        self:_emergencyTeleport("War's Retreat Teleport", "prayer")
     end
 end
 
----updates values in the PlayerState instance
----@private
-function PlayerManager:_updatePlayerState()
-    -- health
-    local maxHp, hp = API.GetHPMax_() or 0, API.GetHP_() or 0
-    self.state.health = self:_createStat(hp, maxHp)
+--- Uses Ancient elven ritual shard if found
+function PlayerManager:useElvenShard()
+    -- Exits the function if Ritual shard isn not found, action is on cooldown or debuff is found
+    if not Inventory:Contains(43358)
+        or Player:getDebuff(43358).found
+        or not self:_checkCooldown(self.timestamps.shard)
+    then
+        return false
+    end
 
-    -- prayer
-    local maxPrayer, prayer = API.GetPrayMax_() or 0, API.GetPray_() or 0
-    self.state.prayer = self:_createStat(prayer, maxPrayer)
-
-    -- adrenaline
-    local adrenData = API.VB_FindPSettinOrder(679) -- adrenaline vb
-    self.state.adrenaline = adrenData and adrenData.state / 10 or 0
-
-    -- position & movement
-    self.state.coords = API.PlayerCoord()
-    self.state.location = self:_determineLocation()
-    self.state.orientation = self:_determineOrientation()
-    self.state.animation = API.ReadPlayerAnim() or -1
-    self.state.moving = API.ReadPlayerMovin2() or false
-    self.state.inCombat = API.GetInCombBit() or false
+    if Inventory:DoAction(43358, 1, API.OFF_ACT_GeneralInterface_route) then
+        self.timestamps.shard = API.Get_tick()
+        return true
+    else
+        return false
+    end
 end
 
-function PlayerManager:_handleStatuses()
-    local highestPriority = -math.huge
-    local oldstatus = self.state.status
-    local activeStatus = nil
+--- Consumes the potion with the provided potion id; if no id is given, consumes the first available prayer item
+--- @param potionId? number: The ID of the potion to consume
+--- @return boolean
+function PlayerManager:drink(potionId)
+    local currentTick = API.Get_tick()
+    local itemId = potionId or self.inventory.prayer[1].id
 
-    for _, status in ipairs(self.config.statuses or {}) do
-        if status.condition(self) and (status.priority > highestPriority) then
-            highestPriority = status.priority
-            activeStatus = status
+    -- Exits function if still on cooldown
+    if not self:_checkCooldown(self.timestamps.drink) or not Inventory:Contains(itemId) then
+        return false
+    end
+
+    if Inventory:DoAction(itemId, 1, API.OFF_ACT_GeneralInterface_route) then
+        self.timestamps.drink = currentTick
+        API.RandomSleep2(60, 10, 20) -- FIXME: Replace with a more efficient sleep method
+        return true
+    else
+        return false
+    end
+end
+
+--- Sets a cooldown period during which the player cannot drink potions.
+--- @param ticks integer: The number of ticks to set the cooldown for drinking potions
+function PlayerManager:dontDrink(ticks)
+    self.timestamps.drink = API.Get_tick() + ticks
+end
+
+--- Sets which buffs should be managed and sorts them by priority
+--- @param buffs Buff[]: A list of buffs to be managed
+function PlayerManager:setBuffConfig(buffs)
+    self.buffs.config = buffs or {}
+
+    -- Sort by priority (higher priority first)
+    table.sort(self.buffs.config, function(a, b)
+        return (a.priority or 0) > (b.priority or 0)
+    end)
+end
+
+--- Main buff processing loop - called from update()
+function PlayerManager:_handleBuffs()
+    -- Update active buff lookup
+    self.buffs.active = {}
+    for _, buff in ipairs(self.buffs.config) do
+        local state = Player:getBuff(buff.buffId)
+        if state.found then
+            self.buffs.active[buff.buffId] = true
         end
     end
 
-    if activeStatus then
-        self.state.status = activeStatus.name
-        activeStatus.execute(self)
-    else
-        self.state.status = "Idle"
+    -- Process all configured buffs
+    for _, buff in ipairs(self.buffs.config) do
+        self:_processBuff(buff)
     end
 
-    if activeStatus and oldstatus ~= activeStatus.name then
-        PlayerManager.debugLog("Status change detected: " .. oldstatus .. " -> " .. activeStatus.name)
-    end
+    -- Clean up toggle buffs that are no longer in config
+    self:_cleanupRemovedToggleBuffs()
 end
 
---#endregion
+------------------------------------------
+--# PLAYER MANAGEMENT HELPER FUNCTIONS
+------------------------------------------
 
---#region player management methods
+--- Checks if an action can be performed based on
+--- @param timestamp integer: The timestamp to check current tick against
+function PlayerManager:_checkCooldown(timestamp)
+    return (API.Get_tick() - timestamp > self.config.interval)
+end
 
---#region player management helper functions
-
----scans inventory and categorizes health and prayer items
-function PlayerManager:_scanInventoryCategory()
-    -- first match wins
-    local categories, rawFoods, rawPrayers = {
+--- Scans the player's inventory, categorizes items, and merges duplicate entries.
+--- @private
+function PlayerManager:_processInventory()
+    -- Define item categories with matching name patterns.
+    local categories = {
         {
             name = "prayer",
             patterns = {
@@ -325,14 +512,23 @@ function PlayerManager:_scanInventoryCategory()
                 "Rocktail soup", "Sailfish soup", "Fury shark", "Primal feast"
             }
         }
-    }, {}, {}
+    }
 
-    for _, item in ipairs(API.ReadInvArrays33()) do
-        if item.itemid1 == -1 or item.itemid1_size ~= 1 then goto continue end
+    -- Temporary tables to store raw items by category.
+    local HealthItems = {}
+    local PrayerItems = {}
 
-        local cleanName = item.textitem:gsub("<col=f8d56b>", "")
+    -- Scan through each item in the player's inventory.
+    for _, item in ipairs(Inventory:GetItems()) do
+        ---@cast item InventoryItem
+        -- Skip empty slots or items with a stack size not equal to 1.
+        if item.id == -1 or item.amount ~= 1 then goto continue end
+
+        -- Remove formatting from the item's name.
+        local cleanName = item.name:gsub("<col=f8d56b>", "")
         local matchedType = nil
 
+        -- Determine item's type by checking if its name matches a known pattern.
         for _, category in ipairs(categories) do
             for _, pattern in ipairs(category.patterns) do
                 if cleanName:find(pattern) then
@@ -343,69 +539,55 @@ function PlayerManager:_scanInventoryCategory()
         end
         ::match_found::
 
+        -- If a matching category is found, create an entry.
         if matchedType then
             local entry = {
                 name = cleanName,
-                id = item.itemid1,
+                id = item.id,
                 type = matchedType,
                 count = 1
             }
-
             if matchedType == "prayer" then
-                table.insert(rawPrayers, entry)
+                table.insert(PrayerItems, entry)
             else
-                table.insert(rawFoods, entry)
+                table.insert(HealthItems, entry)
             end
         end
 
         ::continue::
     end
 
-    -- merge duplicates and update inventory
-    self.inventory.food = self:_mergeDuplicates(rawFoods)
-    self.inventory.prayer = self:_mergeDuplicates(rawPrayers)
-end
-
----merges duplicate inventory entries
----@param items PMInventoryItem[]
----@return PMInventoryItem[]
-function PlayerManager:_mergeDuplicates(items)
-    local merged, seen = {}, {}
-
-    for _, item in ipairs(items) do
-        local key = item.id .. ":" .. item.name
-        if seen[key] then
-            seen[key].count = seen[key].count + 1
-        else
-            seen[key] = {
-                name = item.name,
-                id = item.id,
-                type = item.type,
-                count = 1
-            }
-            table.insert(merged, seen[key])
+    -- Helper function to merge duplicate entries.
+    -- TODO: Add to SonsonUtils
+    local function mergeDuplicates(items)
+        local merged = {}
+        local seen = {}
+        for _, item in ipairs(items) do
+            local key = item.id .. ":" .. item.name
+            if seen[key] then
+                seen[key].count = seen[key].count + 1
+            else
+                seen[key] = {
+                    name = item.name,
+                    id = item.id,
+                    type = item.type,
+                    count = 1
+                }
+                table.insert(merged, seen[key])
+            end
         end
+        return merged
     end
 
-    return merged
+    -- Merge duplicates for both food and prayer items.
+    self.inventory.food = mergeDuplicates(HealthItems)
+    self.inventory.prayer = mergeDuplicates(PrayerItems)
 end
 
----get the number of edible items in your inventory
----@private
----@param table PMInventoryItem[]
----@return number
-function PlayerManager:_getItemCount(table)
-    local itemCount = 0
-    for _, item in pairs(table) do
-        itemCount = itemCount + item.count
-    end
-    return itemCount
-end
-
----retrieves specific type of foodstuffs
----@private
----@param type string
----@return PMInventoryItem[]
+--- Retrieves all food items of a specific type
+--- @param type "food" | "jellyfish" | "potion"
+--- @return PMInventoryItem[]
+--- @private
 function PlayerManager:_filterFoodItems(type)
     local filteredFoodItems = {}
     for _, item in ipairs(self.inventory.food) do
@@ -416,90 +598,54 @@ function PlayerManager:_filterFoodItems(type)
     return filteredFoodItems
 end
 
----@private
----@param resource "health" | "prayer"
----@param thresholdType "normal" | "critical" | "special"
----@return boolean
+--- Checks if the specified resource threshold has been reached
+--- @param resource "health" | "prayer": The type of resource to check for
+--- @param thresholdType "normal" | "critical" | "special" | "solid" | "jellyfish" | "healingPotion": The type of threshold to check for
+--- @return boolean
+--- @private
 function PlayerManager:_checkThreshold(resource, thresholdType)
-    local stat = self.state[resource]
+    local healthStat = { percent = Player:getHpPercent(), current = Player:getHP() }
+    local prayerStat = { percent = Player:getPrayerPercent(), current = Player:getPrayerPoints() }
+    local stat = resource == "health" and healthStat or prayerStat
     local threshold = self.config[resource][thresholdType]
 
     local compareValue = threshold.type == "percent"
-        and stat.percent
-        or stat.current
+        and stat.percent or stat.current
 
     return compareValue <= threshold.value
 end
 
----checks if the player has a specific buff
----@param buffId number
----@return {found: boolean, remaining: number}
-function PlayerManager:getBuff(buffId)
-    local buff = API.Buffbar_GetIDstatus(buffId, false)
-    return { found = buff.found, remaining = (buff.found and API.Bbar_ConvToSeconds(buff)) or 0 }
-end
+--- Teleports in case of an emergency
+--- @param name? string: The name of the emergency teleport
+--- @param critical? "prayer" | "health" | "UNKNOWN": The critical criteria
+function PlayerManager:_emergencyTeleport(name, critical)
+    name = name or "War's Retreat Teleport"
+    critical = critical or "UNKNOWN"
+    local currentTick = API.Get_tick()
 
----checks if the player has a specific debuff
----@param debuffId number
----@return Bbar
-function PlayerManager:getDebuff(debuffId)
-    local debuff = API.DeBuffbar_GetIDstatus(debuffId, false)
-    return { found = debuff.found or false, remaining = (debuff.found and API.Bbar_ConvToSeconds(debuff)) or 0 }
-end
-
---#endregion
-
---#region health management stuff
-
----checks if the player has enhanced excalibur in inventory or equipped
----@private
----@return {location: string, id: number} | boolean
-function PlayerManager:_hasExcalibur()
-    local excalIds = {
-        14632, -- enhanced excalibur
-        36619, -- augmented enhanced excalibur
-    }
-
-    for _, id in ipairs(excalIds) do
-        if API.InvItemFound1(id) then -- check inventory
-            return { location = "inventory", id = id }
-        end
-        if API.GetEquipSlot(5).itemid1 == id then -- check offhand
-            return { location = "equipped", id = id }
+    if self.timestamps.tele - currentTick < 10 then
+        if Utils:useAbility(name) then
+            Utils:log(("Emergency teleport initiated" .. (" (%s)"):format(critical)), "warn")
+            self.timestamps.tele = currentTick
         end
     end
-
-    return false
 end
 
----uses enchanced excalibur after checking if it exists
----@return boolean
-function PlayerManager:useExcalibur()
-    --do the excal check
-    local excalibur = self:_hasExcalibur()
-    if not excalibur or self:getDebuff(14632).found then return false end
-    if API.Get_tick() - self.timestamp.excal < BUFF_INTERVAL_CHECK then return false end
+------------------------------------------
+--# HEALTH MANAGEMENT FUNCTIONS
+------------------------------------------
 
-    if excalibur.location == "inventory" then
-        if API.DoAction_Inventory1(excalibur.id, 0, 1, API.OFF_ACT_GeneralInterface_route) then -- default behavior
-            self.timestamp.excal = API.Get_tick()
-        end
-    elseif excalibur.location == "equipped" then
-        ---@diagnostic disable-next-line
-        if API.DoAction_Interface(0xffffffff, 0x8f0b, 2, 1464, 15, 5, API.OFF_ACT_GeneralInterface_route) then -- default behavior
-            self.timestamp.excal = API.Get_tick()
-        end
-    end
-
-    return false
-end
-
----eats first type of food found returns true if action taken
----@param type string
----@return boolean
+--- Eats first type of food found returns true if action taken
+--- @param type string
+--- @return boolean
 function PlayerManager:_eat(type)
+    -- Gets the first food item of the specified type
     local item = self:_filterFoodItems(type)[1]
-    if API.DoAction_Inventory1(item.id, 0, 1, API.OFF_ACT_GeneralInterface_route) then
+
+    -- Eat found food of specified type.
+    if Inventory:DoAction(item.id, 1, API.OFF_ACT_GeneralInterface_route) then
+        -- FIXME: Without using sleep, how would I add a delay between this action and the rest of the actions in eat in one tick?
+        -- Need to find a replacement from sleep without using a Timer instance
         API.RandomSleep2(60, 10, 20)
         return true
     else
@@ -507,213 +653,149 @@ function PlayerManager:_eat(type)
     end
 end
 
----eats all food in one tick
----@param critical boolean if true will eat food and drain some adren
-function PlayerManager:oneTickEat(critical)
-    local currentTick = API.Get_tick()
-    --first check last drink and eat tick?
-    if currentTick - self.timestamp.eat < BUFF_INTERVAL_CHECK then return end
+------------------------------------------
+--# BUFF MANAGEMENT HELPER FUNCTIONS
+------------------------------------------
 
-    if critical then
-        if #self:_filterFoodItems("food") > 0 then
-            if self:_eat("food") then
-                self.timestamp.eat = currentTick
-                API.RandomSleep2(60, 10, 20)
-            end
+local MAX_BUFF_FAILURES = 5 -- Stop retrying after this many consecutive failures
+
+--- Checks if enough time has passed to attempt applying a specific buff
+--- @param buffId number The ID of the buff to check
+--- @return boolean True if enough time has passed since last attempt
+function PlayerManager:_canAttemptBuff(buffId)
+    local lastAttempt = self.buffs.timestamps[buffId] or 0
+    return (API.Get_tick() - lastAttempt) > self.config.interval
+end
+
+--- Checks if a buff ID exists in a given buff table
+--- @param buffTable Buff[] The table of buffs to search
+--- @param buffId number The ID of the buff to check
+--- @return boolean True if the buff ID exists in the table, false otherwise
+function PlayerManager:_isBuffInTable(buffTable, buffId)
+    for _, buff in ipairs(buffTable) do
+        if buff.buffId == buffId then
+            return true
         end
     end
-    if #self:_filterFoodItems("jellyfish") > 0 then
-        if self:_eat("jellyfish") then
-            self.timestamp.eat = currentTick
-            API.RandomSleep2(60, 10, 20)
-        end
-    end
-    if currentTick - 1 <= self.timestamp.drink then return false end
-    if #self:_filterFoodItems("potion") > 0 then
-        if self:_eat("potion") then
-            self.timestamp.drink = currentTick
-            API.RandomSleep2(60, 10, 20)
-        end
+    return false
+end
+
+--- Adds a buff to the toggle list if it's a toggle buff and not already present
+--- @param buff Buff The buff to potentially add
+function PlayerManager:_addToToggleIfNeeded(buff)
+    if buff.toggle and not self:_isBuffInTable(self.buffs.toggle, buff.buffId) then
+        table.insert(self.buffs.toggle, buff)
     end
 end
 
----manages player health
-function PlayerManager:manageHealth()
-    -- check thresholds
-    local normalThreshold = self:_checkThreshold("health", "normal")
-    local criticalThreshold = self:_checkThreshold("health", "critical")
-    local specialThreshold = self:_checkThreshold("health", "special")
+--- Determines if a buff can be applied based on its canApply property
+--- @param buff Buff The buff to check
+--- @return boolean True if the buff can be applied, false otherwise
+function PlayerManager:_canApplyBuff(buff)
+    if buff.canApply == nil then
+        return true
+    end
 
-    -- do stuff
-    if specialThreshold then self:useExcalibur() end
-    if normalThreshold and #self.inventory.food > 0 then
-        self:oneTickEat(criticalThreshold)
+    ---@diagnostic disable-next-line: return-type-mismatch
+    return (type(buff.canApply) == "function") and buff.canApply() or buff.canApply
+end
+
+--- Processes a single buff - checks state and applies if needed
+--- @param buff Buff The buff to process
+function PlayerManager:_processBuff(buff)
+    local buffState = Player:getBuff(buff.buffId)
+    local refreshAt = buff.refreshAt or -1
+
+    -- Buff is active and doesn't need refresh
+    if buffState.found and buffState.remaining > refreshAt then
+        self:_addToToggleIfNeeded(buff)
         return
     end
 
-    if criticalThreshold and #self.inventory.food == 0 then
-        self:_teleportToWars()
+    -- Buff needs to be applied or refreshed
+    self:_applyBuff(buff)
+end
+
+--- Attempts to apply a buff with per-buff cooldown and failure tracking
+--- @param buff Buff The buff to apply
+--- @return boolean True if the buff was successfully applied
+function PlayerManager:_applyBuff(buff)
+    -- Check per-buff cooldown
+    if not self:_canAttemptBuff(buff.buffId) then
+        return false
     end
-end
 
---#endregion
+    -- Check if we've exceeded max failures
+    local failures = self.buffs.failures[buff.buffId] or 0
+    if failures >= MAX_BUFF_FAILURES then
+        return false -- Stop trying, already logged warning
+    end
 
---#region prayer management stuff
+    -- Check if buff can be applied (e.g., has required items)
+    if not self:_canApplyBuff(buff) then
+        return false
+    end
 
----checks if player has elven ritual shard in inventory
----@return boolean
-function PlayerManager:_hasElvenShard()
-    return API.InvItemFound1(43358)
-end
+    -- Attempt to apply the buff
+    self.buffs.timestamps[buff.buffId] = API.Get_tick()
 
----uses elven ritual shard
-function PlayerManager:useElvenShard()
-    --do shard check
-    if not self:_hasElvenShard() or self:getDebuff(43358).found then return end
-    if API.Get_tick() - self.timestamp.shard < BUFF_INTERVAL_CHECK then return end
-
-    if API.DoAction_Inventory1(43358, 0, 1, API.OFF_ACT_GeneralInterface_route) then
-        self.timestamp.shard = API.Get_tick()
+    if buff.execute() then
+        -- Success - reset failure counter and add to toggle if needed
+        self.buffs.failures[buff.buffId] = 0
+        self:_addToToggleIfNeeded(buff)
         return true
     else
+        -- Failure - increment counter and warn if max reached
+        self.buffs.failures[buff.buffId] = failures + 1
+        if self.buffs.failures[buff.buffId] >= MAX_BUFF_FAILURES then
+            Utils:log(("Buff '%s' failed %d times, will stop retrying"):format(
+                buff.buffName, MAX_BUFF_FAILURES), "warn")
+        end
         return false
     end
 end
 
----consumes first prayer item found & returns true if action taken
----@return boolean
----@param potionId? number
-function PlayerManager:drink(potionId)
-    if API.Get_tick() - self.timestamp.drink < BUFF_INTERVAL_CHECK then return false end
-
-    local itemId = potionId or self.inventory.prayer[1].id
-    if not API.CheckInvStuff2(itemId) then return false end
-
-    if API.DoAction_Inventory1(itemId, 0, 1, API.OFF_ACT_GeneralInterface_route) then
-        self.timestamp.drink = API.Get_tick()
-        API.RandomSleep2(60, 10, 20)
+--- Deactivates a toggle buff by calling its execute function again
+--- @param buff Buff The toggle buff to deactivate
+--- @return boolean True if the buff was deactivated
+function PlayerManager:_deactivateToggleBuff(buff)
+    -- If buff is already off, consider it deactivated
+    if not Player:getBuff(buff.buffId).found then
         return true
-    else
-        return false
     end
+
+    -- Toggle it off by calling execute again
+    if buff.execute() then
+        Utils:log(("Deactivated toggle buff: %s"):format(buff.buffName), "debug")
+        return true
+    end
+    return false
 end
 
----manages player prayer
-function PlayerManager:managePrayer()
-    -- check thresholds
-    local normalThreshold = self:_checkThreshold("prayer", "normal")
-    local criticalThreshold = self:_checkThreshold("prayer", "critical")
-    local specialThreshold = self:_checkThreshold("prayer", "special")
-
-    -- do stuff
-    if specialThreshold then self:useElvenShard() end
-    if normalThreshold and #self.inventory.prayer > 0 then
-        self:drink()
-        return
+--- Cleans up toggle buffs that are no longer in the config list
+function PlayerManager:_cleanupRemovedToggleBuffs()
+    -- Build lookup of current config buff IDs
+    local configIds = {}
+    for _, buff in ipairs(self.buffs.config) do
+        configIds[buff.buffId] = true
     end
 
-    if criticalThreshold and #self.inventory.prayer < 0 then
-        PlayerManager:_teleportToWars()
-    end
-end
+    -- Iterate backwards to safely remove items
+    for i = #self.buffs.toggle, 1, -1 do
+        local buff = self.buffs.toggle[i]
 
---#endregion
-
---#region buff management
-
----manages listed buffs
----@param buffs table
-function PlayerManager:manageBuffs(buffs)
-    local currentTick = API.Get_tick()
-    local managedBuffs, toggleBuffs = {}, {}
-    local canExecute = (currentTick - self.timestamp.buff) >= BUFF_INTERVAL_CHECK
-
-    for _, buff in pairs(buffs) do
-        local allowApply = true
-        if buff.canApply ~= nil then
-            if type(buff.canApply) == "function" then
-                allowApply = buff.canApply(self)
-            elseif type(buff.canApply) == "boolean" then
-                allowApply = buff.canApply
+        -- If buff is no longer in config, deactivate and remove it
+        if not configIds[buff.buffId] then
+            if self:_deactivateToggleBuff(buff) then
+                table.remove(self.buffs.toggle, i)
             end
-        end
-
-        local activeBuff = self:getBuff(buff.buffId)
-        buff.refreshAt = buff.refreshAt or 0
-
-        if activeBuff.found and (activeBuff.remaining >= buff.refreshAt) then
-            local managedBuff = {
-                buffName = buff.buffName,
-                buffId = buff.buffId,
-                remaining = activeBuff.remaining,
-                execute = buff.execute,
-                canApply = buff.canApply
-            }
-            table.insert(managedBuffs, managedBuff)
-            if buff.toggle then
-                table.insert(toggleBuffs, managedBuff)
-            end
-        else
-            if canExecute and allowApply then
-                if buff.execute() then
-                    self.timestamp.buff = currentTick
-                    canExecute = false
-                end
-            end
-        end
-    end
-
-    self.buffs.toggle = toggleBuffs
-    self.buffs.managed = managedBuffs
-end
-
-function PlayerManager:_untoggleBuffs()
-    local currentTick = API.Get_tick()
-    local canExecute = (currentTick - self.timestamp.buff) >= BUFF_INTERVAL_CHECK
-
-    for i, toggleBuff in ipairs(self.buffs.toggle) do
-        local managed = false
-        for _, managedBuff in ipairs(self.buffs.managed) do
-            if managedBuff.buffId == toggleBuff.buffId then
-                managed = true
-                break
-            end
-        end
-
-        local activeBuff = self:getBuff(toggleBuff.buffId)
-        local active = activeBuff.found and (toggleBuff.buffName ~= "Scripture of Ful" or activeBuff.remaining > 15)
-
-        if managed then goto continue end
-        if active then
-            if canExecute then
-                if toggleBuff.execute() then
-                    self.timestamp.buff = currentTick
-                    canExecute = false
-                end
-            end
-        end
-        ::continue::
-        if not active then
-            table.remove(self.buffs.toggle, i)
         end
     end
 end
 
----@param buff Bbar
-function PlayerManager:_getBuffName(buff)
-    for _, managedBuff in pairs(self.buffs.managed) do
-        if buff.id == managedBuff.buffId then
-            return managedBuff.buffName
-        end
-    end
-    return "UNKNOWN"
-end
-
---#endregion
-
---#endregion
-
---#region tracking
+------------------------------------------
+--# TRACKING & METRICS
+------------------------------------------
 
 ---returns tracking metrics for the player state
 ---@return table
@@ -721,36 +803,22 @@ function PlayerManager:stateTracking()
     local metrics = {
         { "Player State:", "" },
         -- stats
-        { "- Health",      self.state.health.current .. "/" .. self.state.health.max .. " (" .. self.state.health.percent .. "%)" },
-        { "- Prayer",      self.state.prayer.current .. "/" .. self.state.prayer.max .. " (" .. self.state.prayer.percent .. "%)" },
-        { "- Adrenaline",  self.state.adrenaline },
-        -- status
-        { "- Status",      self.state.status },
+        { "- Health",      Player:getHP() .. "/" .. Player:getMaxHP() .. " (" .. Player:getHpPercent() .. "%)" },
+        { "- Prayer",      Player:getPrayerPoints() .. "/" .. Player:getMaxPrayerPoints() .. " (" .. Player:getPrayerPercent() .. "%)" },
+        { "- Summoning",   Player:getSummoningPoints() .. "/" .. Player:getMaxSummoningPoints() .. " (" .. Player:getSummoningPointsPercent() .. "%)" },
+        { "- Adrenaline",  Player:getAdrenaline() },
         -- location
-        { "- Location",    self.state.location },
-        { "- Direction",   self.state.orientation },
+        { "- Location",    "DEPRECATED" },
+        { "- Direction",   Player:getFacingDirection() .. " (" .. Player:getOrientation() .. "°)" },
         { "- Coordinates", string.format("(%s, %s, %s)",
-            self.state.coords.x,
-            self.state.coords.y,
-            self.state.coords.z) },
+            Player:getCoords().x,
+            Player:getCoords().y,
+            Player:getCoords().z) },
         -- animations
-        { "- Animation",  self.state.animation == 0 and "Idle" or self.state.animation },
-        { "- Moving?",    self.state.moving and "Yes" or "No" },
-        { "- In Combat?", self.state.inCombat and "Yes" or "No" },
-    }
-    return metrics
-end
-
----returns tracking metrics for player management data
----@return table
-function PlayerManager:managementTracking()
-    local metrics = {
-        { "Player Management:",         "" },
-        { "- Items: ",                  "" },
-        { "-- Has Excalibur?",          self:_hasExcalibur() and "Yes" or "No" },
-        { "-- Has Elven ritual shard?", self:_hasElvenShard() and "Yes" or "No" },
-        { "-- Edible food count:",      self:_getItemCount(self.inventory.food) },
-        { "-- Prayer items count:",     self:_getItemCount(self.inventory.prayer) }
+        { "- Animation",     (not Player:isAnimating() and "Idle") or Player:getAnimation() },
+        { "- Is Moving?",    Player:isMoving() and "Yes" or "No" },
+        { "- Is In Combat?", Player:isInCombat() and "Yes" or "No" },
+        -- TODO: Add more stuff here
     }
     return metrics
 end
@@ -784,14 +852,65 @@ function PlayerManager:prayerItemsTracking()
 end
 
 ---@return table
-function PlayerManager:managedBuffsTracking()
-    local metrics = { { "- Managed Buffs:", "" } }
+function PlayerManager:buffConfigTracking()
+    local metrics = { { "Configured Buffs:", "" } }
 
-    if #self.buffs.managed < 1 then
-        table.insert(metrics, { "-- No buffs found", "" })
+    if #self.buffs.config < 1 then
+        table.insert(metrics, { "- No buffs configured", "" })
     else
-        for _, i in pairs(self.buffs.managed) do
-            table.insert(metrics, { "-- " .. i.buffId .. ": " .. i.buffName, "Remaining: " .. i.remaining })
+        for _, buff in ipairs(self.buffs.config) do
+            local isActive = self.buffs.active[buff.buffId] and "Active" or "Inactive"
+            local buffType = buff.toggle and "toggle" or "static"
+            local priority = buff.priority or 0
+            table.insert(metrics, {
+                string.format("- [%d] %s", buff.buffId, buff.buffName),
+                string.format("%s | %s | Pri:%d", isActive, buffType, priority)
+            })
+        end
+    end
+    return metrics
+end
+
+---@return table
+function PlayerManager:buffFailuresTracking()
+    local metrics = { { "Buff Failures:", "" } }
+
+    local hasFailures = false
+    for buffId, count in pairs(self.buffs.failures) do
+        if count > 0 then
+            hasFailures = true
+            -- Find buff name
+            local buffName = "Unknown"
+            for _, buff in ipairs(self.buffs.config) do
+                if buff.buffId == buffId then
+                    buffName = buff.buffName
+                    break
+                end
+            end
+            table.insert(metrics, {
+                string.format("- [%d] %s", buffId, buffName),
+                string.format("Failures: %d/%d", count, MAX_BUFF_FAILURES)
+            })
+        end
+    end
+
+    if not hasFailures then
+        table.insert(metrics, { "- No failures recorded", "" })
+    end
+    return metrics
+end
+
+---@return table
+function PlayerManager:toggleBuffsTracking()
+    local metrics = { { "Toggle Buffs:", "" } }
+
+    if #self.buffs.toggle < 1 then
+        table.insert(metrics, { "- No buffs found", "" })
+    else
+        for _, i in pairs(self.buffs.toggle) do
+            table.insert(metrics,
+                { string.format("- [%d] %s (%s)", i.buffId, i.buffName, i.toggle and "toggle" or "static"), "Active: " ..
+                tostring(Player:getBuff(i.buffId).found) })
         end
     end
     return metrics
@@ -799,29 +918,22 @@ end
 
 ---@return table
 function PlayerManager:activeBuffsTracking()
-    local metrics = { { "- Active Buffs:", "" } }
+    local metrics = { { "Active Buffs:", "" } }
     local activeBuffs = API.Buffbar_GetAllIDs(false)
 
     if #activeBuffs < 1 then
-        table.insert(metrics, { "-- No buffs found", "" })
+        table.insert(metrics, { "- No buffs found", "" })
     else
         for _, i in pairs(activeBuffs) do
             table.insert(metrics,
-                { "-- " .. i.id .. ": " .. self:_getBuffName(i), "Text (conv): " .. i.text .. " (" .. i.conv_text .. ")" })
+                { "- " .. i.id, "Text (conv): " .. i.text .. " (" .. i.conv_text .. ")" })
         end
     end
     return metrics
 end
 
---#endregion
-
----updates the player state
-function PlayerManager:update()
-    self:_untoggleBuffs()
-    self.buffs.managed = {}
-    self:_updatePlayerState()     -- refresh player data
-    self:_scanInventoryCategory() -- get the inventory items
-    self:_handleStatuses()        -- handle statuses
-end
+------------------------------------------
+--# FIN
+------------------------------------------
 
 return PlayerManager
