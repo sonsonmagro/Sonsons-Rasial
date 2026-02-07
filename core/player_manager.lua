@@ -1,74 +1,5 @@
 --- @module "Sonson's Player Manager"
---- @version 2.0.0.0
-
-------------------------------------------
---# CHANGELOG
-------------------------------------------
---[[
-    Version 2.0.0.0 - Buff Management Overhaul
-    ------------------------------------------
-
-    BREAKING CHANGES:
-    • Renamed `manageBuffs()` to `setBuffConfig()` - update all call sites
-    • Renamed `managedBuffsTracking()` to `buffConfigTracking()`
-    • Removed `self.buffs.managed` table (was unused functionally)
-    • Removed `self.buffs.assigned` - replaced with `self.buffs.config`
-
-    NEW FEATURES:
-    • Per-buff cooldowns: Each buff now has its own cooldown timer instead of
-      a shared global cooldown. This allows multiple buffs to be applied in
-      quick succession without blocking each other.
-
-    • Failure tracking: Buffs that fail to apply are tracked. After 5
-      consecutive failures, the system stops retrying and logs a warning.
-      Failures reset on successful application.
-
-    • Priority support: Buffs can now have a `priority` field. Higher priority
-      buffs are processed first. Default priority is 0.
-
-    • New tracking function: `buffFailuresTracking()` shows which buffs have
-      failed and how many times.
-
-    IMPROVED:
-    • Toggle buff cleanup logic is now clearer with dedicated
-      `_deactivateToggleBuff()` function
-    • `buffConfigTracking()` now shows active status, type, and priority
-    • Better separation of concerns in helper functions
-
-    DATA STRUCTURE CHANGES:
-    Old:
-        self.buffs = {
-            managed = {},   -- Removed (was unused)
-            assigned = {},  -- Renamed to 'config'
-            toggle = {}
-        }
-
-    New:
-        self.buffs = {
-            config = {},      -- Buff definitions to manage
-            active = {},      -- Quick lookup of active buff IDs
-            toggle = {},      -- Toggle buffs currently on
-            failures = {},    -- Failed application counts per buff
-            timestamps = {}   -- Per-buff cooldown tracking
-        }
-
-    FUNCTION RENAMES:
-        manageBuffs()                    → setBuffConfig()
-        _processAssignedBuff()           → _processBuff()
-        _handleInactiveBuff()            → _applyBuff()
-        _cleanupUnmanagedToggleBuffs()   → _cleanupRemovedToggleBuffs()
-        _addToTableIfNotExists()         → _addToToggleIfNeeded()
-        managedBuffsTracking()           → buffConfigTracking()
-
-    NEW FUNCTIONS:
-        _canAttemptBuff(buffId)          - Per-buff cooldown check
-        _deactivateToggleBuff(buff)      - Explicitly deactivate a toggle buff
-        buffFailuresTracking()           - Track buff application failures
-
-    REMOVED FUNCTIONS:
-        _createAssignedIdsLookup()       - Logic inlined where needed
-        _handleActiveBuff()              - Merged into _processBuff()
-]]
+--- @version 2.1.0.0
 
 ------------------------------------------
 --# IMPORTS
@@ -87,6 +18,8 @@ local Utils           = require("core.helper")
 --- @field prayer?                          PrayerThreshold                                             Configuration for managing prayer thresholds
 --- @field interval?                        integer                                                     The duration in which to wait before re-attempting an action
 --- @field excaliburHealAction?             '1' | '2'                                                   1 for default behavior
+--- @field preferJellyfishHighAdrenaline?   boolean                                                     If true, prefer jellyfish when adrenaline > 50% (default: false)
+--- @field adrenalineThreshold?             integer                                                     Adrenaline percentage threshold for preferring jellyfish (default: 50)
 --- @field debug?                           boolean                                                     True to show debugging
 
 --- @class PrayerThreshold
@@ -101,7 +34,7 @@ local Utils           = require("core.helper")
 --- @field special?                         Threshold                                                   The threshold that activates special items like Enhanced Excalibur or Ancient Elven Ritual Shard
 
 --- @class Threshold
---- @field type                             "fixed" | "percent"                                         Specifies whether the threshold is based on a fixed value or a percentage
+--- @field type                             "fixed" | "percent" | "current"                             Specifies whether the threshold is based on a fixed value or a percentage (Note: "current" is treated the same as "fixed")
 --- @field value                            integer                                                     The minimum value that triggers the threshold
 
 --- @class PMInventoryItem
@@ -132,7 +65,8 @@ local Utils           = require("core.helper")
 --- @field priority?                        number                                                      Higher priority buffs are processed first (default: 0)
 
 --- @class BuffState
---- @field config                           Buff[]                                                      The buff definitions to manage
+--- @field requested                        table<number, Buff>                                         Buffs requested this frame { [buffId] = Buff }
+--- @field lastProcessed                    Buff[]                                                      Snapshot of last frame's processed buffs (for tracking)
 --- @field active                           table<number, boolean>                                      Quick lookup of currently active buff IDs
 --- @field toggle                           Buff[]                                                      A list of toggleable buffs that are currently on
 --- @field failures                         table<number, number>                                       Track failed applications { [buffId] = attemptCount }
@@ -153,7 +87,10 @@ local Utils           = require("core.helper")
 --- @field useElvenShard                    fun(self):boolean                                           Uses Ancient Elven Ritual Shard if found
 --- @field drink                            fun(self, potionId?: integer):boolean                       Drinks a potion if an ID is provided or will consume the first prayer restoring potion otherwise
 --- @field dontDrink                        fun(self, ticks: number)                                    Sets a cooldown for drinking potions
---- @field setBuffConfig                    fun(self, buffs: Buff[])                                    Sets which buffs should be managed (sorts by priority)
+--- @field requestBuffs                     fun(self, buffs: Buff[])                                    Requests buffs for the current frame (call each loop iteration)
+--- @field deactivateAllToggleBuffs         fun(self)                                                   Immediately deactivates all toggle buffs
+--- @field resetBuffTracking                fun(self)                                                   Resets buff failure counts and timestamps
+--- @field updateConfig                     fun(self, config: PlayerManagerConfig)                      Updates configuration settings (thresholds, interval, etc.)
 --- Metrics
 --- @field stateTracking                    fun(self):table                                             Returns tracking metrics for the player's state
 --- @field foodItemsTracking                fun(self):table                                             Returns tracking metrics for food items
@@ -176,7 +113,7 @@ local Utils           = require("core.helper")
 --- @field _processBuff                     fun(self, buff: Buff)                                       Processes a buff, applying it if needed
 --- @field _applyBuff                       fun(self, buff: Buff):boolean                               Attempts to apply a buff with failure tracking
 --- @field _deactivateToggleBuff            fun(self, buff: Buff):boolean                               Deactivates a toggle buff that's no longer in config
---- @field _cleanupRemovedToggleBuffs       fun(self)                                                   Cleans up toggle buffs that are no longer in config
+--- @field _deactivateUnrequestedToggleBuffs fun(self)                                                   Deactivates toggle buffs not requested this frame
 
 ------------------------------------------
 --# INITIALIZATION
@@ -221,10 +158,15 @@ function PlayerManager.new(config)
     }
     self.config.excaliburHealAction = (config and config.excaliburHealAction) or '1'
     self.config.interval = (config and config.interval) or 1
+    self.config.preferJellyfishHighAdrenaline = (config and config.preferJellyfishHighAdrenaline) or false
+    self.config.adrenalineThreshold = (config and config.adrenalineThreshold) or 50
 
     Utils:log("Solid: " .. self.config.health.solid.value)
     Utils:log("Jellyfish: " .. self.config.health.jellyfish.value)
     Utils:log("Potion: " .. self.config.health.healingPotion.value)
+    if self.config.preferJellyfishHighAdrenaline then
+        Utils:log("Adrenaline-aware eating enabled (threshold: " .. self.config.adrenalineThreshold .. "%)")
+    end
 
     -- Timestamps of the last ticks in which the actions were used
     self.timestamps = {
@@ -233,7 +175,8 @@ function PlayerManager.new(config)
         buff = 0,
         excal = 0,
         shard = 0,
-        tele = 0
+        tele = 0,
+        inventoryScan = 0  -- Track last inventory scan for cooldown
     }
 
     -- Contains information regarding inventory items
@@ -244,11 +187,12 @@ function PlayerManager.new(config)
 
     -- Contains information regarding the player's managed buffs
     self.buffs = {
-        config = {},    -- The buff definitions to manage
-        active = {},    -- Quick lookup of currently active buff IDs
-        toggle = {},    -- Toggle buffs that are currently on
-        failures = {},  -- Track failed applications { [buffId] = attemptCount }
-        timestamps = {} -- Per-buff cooldown tracking { [buffId] = lastAttemptTick }
+        requested = {},     -- Buffs requested this frame { [buffId] = Buff }
+        lastProcessed = {}, -- Snapshot of last frame's processed buffs (for tracking)
+        active = {},        -- Quick lookup of currently active buff IDs
+        toggle = {},        -- Toggle buffs that are currently on
+        failures = {},      -- Track failed applications { [buffId] = attemptCount }
+        timestamps = {}     -- Per-buff cooldown tracking { [buffId] = lastAttemptTick }
     }
 
     -- Default debug values
@@ -264,7 +208,12 @@ end
 
 --- Updates player manager data
 function PlayerManager:update()
-    self:_processInventory() -- get the inventory items
+    -- Only scan inventory every 5 ticks to improve performance
+    local currentTick = API.Get_tick()
+    if currentTick - self.timestamps.inventoryScan > 5 then
+        self:_processInventory()
+        self.timestamps.inventoryScan = currentTick
+    end
     self:_handleBuffs()
 end
 
@@ -337,6 +286,25 @@ function PlayerManager:oneTickEat(solidFoodThreshold, jellyfishThreshold, healin
     end
 
     local success = false
+
+    -- Adrenaline-aware eating: prefer jellyfish when adrenaline is high
+    if self.config.preferJellyfishHighAdrenaline then
+        local currentAdrenaline = Player:getAdrenaline()
+        local hasJellyfish = #self:_filterFoodItems("jellyfish") > 0
+        local hasSolidFood = #self:_filterFoodItems("food") > 0
+
+        -- If adrenaline is above threshold and we have jellyfish, prioritize it
+        if currentAdrenaline >= self.config.adrenalineThreshold and hasJellyfish and jellyfishThreshold then
+            if self:_eat("jellyfish") then
+                self.timestamps.eat = currentTick
+                success = true
+                Utils:log(("Adrenaline-aware: ate jellyfish (adr: %d%%)"):format(currentAdrenaline), "debug")
+            end
+            -- Skip solid food to preserve adrenaline
+            solidFoodThreshold = false
+        end
+    end
+
     if solidFoodThreshold then
         if #self:_filterFoodItems("food") > 0 then
             if self:_eat("food") then
@@ -358,7 +326,7 @@ function PlayerManager:oneTickEat(solidFoodThreshold, jellyfishThreshold, healin
     if healingPotionThreshold then
         if #self:_filterFoodItems("potion") > 0 then
             if self:_eat("potion") then
-                self.timestamps.eat = currentTick
+                self.timestamps.drink = currentTick
                 success = true
             end
         end
@@ -418,7 +386,7 @@ function PlayerManager:drink(potionId)
 
     if Inventory:DoAction(itemId, 1, API.OFF_ACT_GeneralInterface_route) then
         self.timestamps.drink = currentTick
-        API.RandomSleep2(60, 10, 20) -- FIXME: Replace with a more efficient sleep method
+        -- Removed blocking sleep - cooldown system handles timing
         return true
     else
         return false
@@ -431,35 +399,137 @@ function PlayerManager:dontDrink(ticks)
     self.timestamps.drink = API.Get_tick() + ticks
 end
 
---- Sets which buffs should be managed and sorts them by priority
---- @param buffs Buff[]: A list of buffs to be managed
-function PlayerManager:setBuffConfig(buffs)
-    self.buffs.config = buffs or {}
+--- Requests buffs to be managed for the current frame.
+--- Call this every loop iteration for each set of buffs that should be active.
+--- Can be called multiple times per frame — requests accumulate.
+--- Toggle buffs that are not requested on a given frame are automatically deactivated.
+--- @param buffs Buff[]: A list of buffs to request
+function PlayerManager:requestBuffs(buffs)
+    for _, buff in ipairs(buffs or {}) do
+        self.buffs.requested[buff.buffId] = buff
+    end
+end
 
-    -- Sort by priority (higher priority first)
-    table.sort(self.buffs.config, function(a, b)
-        return (a.priority or 0) > (b.priority or 0)
-    end)
+--- Immediately deactivates all toggle buffs and clears the toggle list
+function PlayerManager:deactivateAllToggleBuffs()
+    Utils:log("Deactivating all toggle buffs", "debug")
+
+    -- Iterate backwards to safely remove items
+    for i = #self.buffs.toggle, 1, -1 do
+        local buff = self.buffs.toggle[i]
+        if self:_deactivateToggleBuff(buff) then
+            Utils:log(("Deactivated: %s"):format(buff.buffName), "debug")
+        else
+            Utils:log(("Failed to deactivate: %s"):format(buff.buffName), "warn")
+        end
+        table.remove(self.buffs.toggle, i)
+    end
+
+    Utils:log("All toggle buffs deactivated", "info")
+end
+
+--- Resets buff failure counts and timestamps
+function PlayerManager:resetBuffTracking()
+    Utils:log("Resetting buff tracking (failures and timestamps)", "info")
+    self.buffs.failures = {}
+    self.buffs.timestamps = {}
+end
+
+--- Updates configuration settings without recreating the instance
+--- @param config PlayerManagerConfig: New configuration values to merge
+function PlayerManager:updateConfig(config)
+    if not config then
+        Utils:log("updateConfig called with nil config", "warn")
+        return
+    end
+
+    Utils:log("Updating PlayerManager configuration", "info")
+
+    -- Update health thresholds if provided
+    if config.health then
+        if config.health.solid then
+            self.config.health.solid = config.health.solid
+        end
+        if config.health.jellyfish then
+            self.config.health.jellyfish = config.health.jellyfish
+        end
+        if config.health.healingPotion then
+            self.config.health.healingPotion = config.health.healingPotion
+        end
+        if config.health.special then
+            self.config.health.special = config.health.special
+        end
+    end
+
+    -- Update prayer thresholds if provided
+    if config.prayer then
+        if config.prayer.normal then
+            self.config.prayer.normal = config.prayer.normal
+        end
+        if config.prayer.critical then
+            self.config.prayer.critical = config.prayer.critical
+        end
+        if config.prayer.special then
+            self.config.prayer.special = config.prayer.special
+        end
+    end
+
+    -- Update other settings if provided
+    if config.excaliburHealAction then
+        self.config.excaliburHealAction = config.excaliburHealAction
+    end
+
+    if config.interval then
+        self.config.interval = config.interval
+    end
+
+    if config.debug ~= nil then
+        self.debug = config.debug
+    end
+
+    if config.preferJellyfishHighAdrenaline ~= nil then
+        self.config.preferJellyfishHighAdrenaline = config.preferJellyfishHighAdrenaline
+    end
+
+    if config.adrenalineThreshold then
+        self.config.adrenalineThreshold = config.adrenalineThreshold
+    end
+
+    Utils:log("Configuration updated successfully", "info")
 end
 
 --- Main buff processing loop - called from update()
+--- Processes all buffs requested this frame via requestBuffs(), then
+--- deactivates any toggle buffs that were not requested.
 function PlayerManager:_handleBuffs()
+    -- Build sorted processing list from requested buffs
+    local toProcess = {}
+    for _, buff in pairs(self.buffs.requested) do
+        table.insert(toProcess, buff)
+    end
+    table.sort(toProcess, function(a, b)
+        return (a.priority or 0) > (b.priority or 0)
+    end)
+
     -- Update active buff lookup
     self.buffs.active = {}
-    for _, buff in ipairs(self.buffs.config) do
-        local state = Player:getBuff(buff.buffId)
-        if state.found then
+    for _, buff in ipairs(toProcess) do
+        if Player:getBuff(buff.buffId).found then
             self.buffs.active[buff.buffId] = true
         end
     end
 
-    -- Process all configured buffs
-    for _, buff in ipairs(self.buffs.config) do
+    -- Process all requested buffs (apply if inactive/expired)
+    for _, buff in ipairs(toProcess) do
         self:_processBuff(buff)
     end
 
-    -- Clean up toggle buffs that are no longer in config
-    self:_cleanupRemovedToggleBuffs()
+    -- Deactivate toggle buffs that were NOT requested this frame
+    self:_deactivateUnrequestedToggleBuffs()
+
+    -- Save snapshot for tracking, then clear for next frame
+    self.buffs.lastProcessed = toProcess
+    self.buffs.requested = {}
 end
 
 ------------------------------------------
@@ -623,7 +693,8 @@ function PlayerManager:_emergencyTeleport(name, critical)
     critical = critical or "UNKNOWN"
     local currentTick = API.Get_tick()
 
-    if self.timestamps.tele - currentTick < 10 then
+    -- Fixed: Corrected timing check (was: self.timestamps.tele - currentTick < 10)
+    if currentTick - self.timestamps.tele > 10 then
         if Utils:useAbility(name) then
             Utils:log(("Emergency teleport initiated" .. (" (%s)"):format(critical)), "warn")
             self.timestamps.tele = currentTick
@@ -644,9 +715,7 @@ function PlayerManager:_eat(type)
 
     -- Eat found food of specified type.
     if Inventory:DoAction(item.id, 1, API.OFF_ACT_GeneralInterface_route) then
-        -- FIXME: Without using sleep, how would I add a delay between this action and the rest of the actions in eat in one tick?
-        -- Need to find a replacement from sleep without using a Timer instance
-        API.RandomSleep2(60, 10, 20)
+        -- Removed blocking sleep - the game client handles action spacing within a tick
         return true
     else
         return false
@@ -690,14 +759,16 @@ end
 
 --- Determines if a buff can be applied based on its canApply property
 --- @param buff Buff The buff to check
---- @return boolean True if the buff can be applied, false otherwise
+--- @return boolean|fun():boolean True if the buff can be applied, false otherwise
 function PlayerManager:_canApplyBuff(buff)
     if buff.canApply == nil then
         return true
     end
 
-    ---@diagnostic disable-next-line: return-type-mismatch
-    return (type(buff.canApply) == "function") and buff.canApply() or buff.canApply
+    if type(buff.canApply) == "function" then
+        return buff.canApply()
+    end
+    return buff.canApply
 end
 
 --- Processes a single buff - checks state and applies if needed
@@ -772,20 +843,11 @@ function PlayerManager:_deactivateToggleBuff(buff)
     return false
 end
 
---- Cleans up toggle buffs that are no longer in the config list
-function PlayerManager:_cleanupRemovedToggleBuffs()
-    -- Build lookup of current config buff IDs
-    local configIds = {}
-    for _, buff in ipairs(self.buffs.config) do
-        configIds[buff.buffId] = true
-    end
-
-    -- Iterate backwards to safely remove items
+--- Deactivates toggle buffs that were not requested this frame
+function PlayerManager:_deactivateUnrequestedToggleBuffs()
     for i = #self.buffs.toggle, 1, -1 do
         local buff = self.buffs.toggle[i]
-
-        -- If buff is no longer in config, deactivate and remove it
-        if not configIds[buff.buffId] then
+        if not self.buffs.requested[buff.buffId] then
             if self:_deactivateToggleBuff(buff) then
                 table.remove(self.buffs.toggle, i)
             end
@@ -853,12 +915,13 @@ end
 
 ---@return table
 function PlayerManager:buffConfigTracking()
-    local metrics = { { "Configured Buffs:", "" } }
+    local metrics = { { "Managed Buffs:", "" } }
+    local buffs = self.buffs.lastProcessed or {}
 
-    if #self.buffs.config < 1 then
-        table.insert(metrics, { "- No buffs configured", "" })
+    if #buffs < 1 then
+        table.insert(metrics, { "- No buffs requested", "" })
     else
-        for _, buff in ipairs(self.buffs.config) do
+        for _, buff in ipairs(buffs) do
             local isActive = self.buffs.active[buff.buffId] and "Active" or "Inactive"
             local buffType = buff.toggle and "toggle" or "static"
             local priority = buff.priority or 0
@@ -879,9 +942,9 @@ function PlayerManager:buffFailuresTracking()
     for buffId, count in pairs(self.buffs.failures) do
         if count > 0 then
             hasFailures = true
-            -- Find buff name
+            -- Find buff name from last processed snapshot
             local buffName = "Unknown"
-            for _, buff in ipairs(self.buffs.config) do
+            for _, buff in ipairs(self.buffs.lastProcessed or {}) do
                 if buff.buffId == buffId then
                     buffName = buff.buffName
                     break

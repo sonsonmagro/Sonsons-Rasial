@@ -1,32 +1,11 @@
---[[                                ╔═══════════════════════════════════════════════════╗
-                                    ║    ██████╗ ██████╗ ███████╗███╗   ███╗███████╗    ║
-                                    ║    ██╔══██╗██╔══██╗██╔════╝████╗ ████║██╔════╝    ║
-                                    ║    ██████╔╝██║  ██║███████╗██╔████╔██║█████╗      ║
-                                    ║    ██╔══██╗██║  ██║╚════██║██║╚██╔╝██║██╔══╝      ║
-                                    ║    ██████╔╝██████╔╝███████║██║ ╚═╝ ██║███████╗    ║
-                                    ║    ╚═════╝ ╚═════╝ ╚══════╝╚═╝     ╚═╝╚══════╝    ║
-                                    ╠═══════════════════════════════════════════════════╣
-                                    ║                  Discord handles                  ║
-                                    ╠═════════════╦═══════════════════╦═════════════════╣
-                                    ║ Dead(dea.d) ║ Sonson(.sonson._) ║Nocturnal(nctrl_)║
-                                    ╠═════════════╩═══════════════════╩═════════════════╣
-                                    ║We only publish here: https://github.com/BDSMe     ║
-            ╔═══════════════════════╩═══════════════════════════════════════════════════╩═══════════════════════╗
-            ║   Manages your actions and avoids spamming without having to use sleep                            ║
-            ║                                                                                                   ║
-            ║   File: timer.lua                                                                                 ║
-            ║   Authors: BDSMe [Dead, Sonson, Nocturnal]                                                        ║
-            ╚═══════════════════════════════════════════════════════════════════════════════════════════════════╝
-]]
-
---- @module 'BDSME Timer'
---- @version 2.0.0
+--- @module "Sonson's Timer"
+--- @version 2.1.0
 
 ------------------------------------------
 --# IMPORTS
 ------------------------------------------
 
-local API    = require("api")
+local API = require("api")
 
 ------------------------------------------
 --# TYPE DEFINITIONS
@@ -43,6 +22,9 @@ local API    = require("api")
 --- @field priority?        integer                     Priority order; higher means execute earlier (optional).
 --- @field parallel?        boolean                     Run immediately independent of priority (optional).
 --- @field cooldownSkip?    boolean                     Skip task if still cooling down (optional).
+--- @field disabled?        boolean                     Task is temporarily disabled (optional).
+--- @field dependsOn?       string[]                    Task names that must execute this cycle before this task (optional).
+--- @field blockedBy?       string[]                    Task names that must complete before this task can run (optional).
 --- @field executionData    Timer.TaskExecutionData     Tracks last execution time and run count.
 
 --- @class Timer.ExecutionData
@@ -53,14 +35,27 @@ local API    = require("api")
 --- @field lastRun          integer                     Last run tick or timestamp.
 --- @field count            integer                     Total number of executions.
 
+--- @class Timer.RecentAction
+--- @field name             string                      Name of the task that was executed.
+--- @field timestamp        number                      Timestamp (ms) when the action was executed.
+--- @field tick             integer                     Game tick when the action was executed.
+
 --- @class Timer
---- @field tasks            table<string, Timer.Task>   Collection of tasks.
---- @field lastExecution    Timer.ExecutionData         Records last execution tick and time.
---- @field debug            boolean                     Enables debug logging.
---- @field addTask          fun(self, task:Timer.Task)  Adds a task to the timer's tasks
---- @field run              fun(self):boolean           Executes assigned tasks based on conditions, priority and type
---- @field getStatus        fun(self):string            Returns a string of all active tasks
---- @field getMetrics       fun(self):table             Returns a metrics table of active tasks
+--- @field tasks                 table<string, Timer.Task>   Collection of tasks.
+--- @field lastExecution         Timer.ExecutionData         Records last execution tick and time.
+--- @field recentActions         Timer.RecentAction[]        Last 50 executed actions, newest first.
+--- @field debug                 boolean                     Enables debug logging.
+--- @field addTask               fun(self, task:Timer.Task)  Adds a task to the timer's tasks
+--- @field removeTask            fun(self, taskName:string):boolean  Removes a task from the timer
+--- @field disableTask           fun(self, taskName:string):boolean  Disables a task temporarily
+--- @field enableTask            fun(self, taskName:string):boolean  Enables a previously disabled task
+--- @field resetTask             fun(self, taskName:string):boolean  Resets execution data for a task
+--- @field resetAllTasks         fun(self)                   Resets execution data for all tasks
+--- @field run                   fun(self):boolean           Executes assigned tasks based on conditions, priority and type
+--- @field getStatus             fun(self):string            Returns a string of all active tasks
+--- @field getMetrics            fun(self):table             Returns a metrics table of active tasks
+--- @field getTaskExecutionData  fun(self, taskName:string):Timer.TaskExecutionData|nil  Retrieves execution data for a task
+--- @field getRecentActions      fun(self, limit?:integer):Timer.RecentAction[]  Returns recent actions (optionally limited)
 
 ------------------------------------------
 --# TIMER TASK CONFIGURATION
@@ -87,6 +82,7 @@ local API    = require("api")
     • cooldown:   (number)  Minimum delay (ticks/ms) before this task can execute again (default: 0)
     • useTicks:   (boolean) Use game ticks instead of milliseconds for cooldown (default: false)
     • delay:      (number)  Minimum wait after last timer action before executing (default: 0)
+                            NOTE: Only applies to non-parallel tasks. Parallel tasks ignore delays.
     • delayTicks: (boolean) Use ticks instead of milliseconds for delay timing (default: false)
 
     O P T I O N A L   P A R A M E T E R S :
@@ -98,12 +94,13 @@ local API    = require("api")
     E X E C U T I O N   R U L E S :
     ------------------------------------------------------------------------------------------------
     1. Parallel tasks execute first when their cooldown expires and conditions are met
+       - Parallel tasks are NEVER affected by delays (always checked first)
     2. Non-parallel tasks execute in priority order (highest first) when:
        - All conditions are met
        - Cooldown has expired
-       - Delay requirement is met
+       - Delay requirement is met (global delay since last non-parallel task)
     3. Within priority groups, tasks execute in declaration order
-    4. Timer maintains single execution history for delay calculations
+    4. Timer maintains single execution history for delay calculations (non-parallel only)
     5. Tasks with cooldownSkip skip execution checks while cooling down
     6. Action should return true on success to update execution tracking
 
@@ -130,6 +127,7 @@ function Timer.new()
         tick = 0,
         time = 0
     }
+    self.recentActions = {}
     self.debug = false
     return self
 end
@@ -142,26 +140,96 @@ function Timer:addTask(task)
         error("Tasks require at least name and action fields")
     end
 
+    if not task.condition or type(task.condition) ~= "function" then
+        error("Task condition must be a function")
+    end
+
     -- Set defaults
     ---@type Timer.Task
     local normalizedTask = {
-        name            = task.name,
-        action          = task.action,
-        condition       = task.condition,
-        priority        = task.priority or 0,
-        cooldown        = task.cooldown or 0,
-        delay           = task.delay or 0,
-        useTicks        = task.useTicks or false,
-        delayTicks      = task.delayTicks or false,
-        parallel        = task.parallel or false,
-        cooldownSkip    = task.cooldownSkip or false,
-        executionData   = {
+        name          = task.name,
+        action        = task.action,
+        condition     = task.condition,
+        priority      = task.priority or 0,
+        cooldown      = task.cooldown or 0,
+        delay         = task.delay or 0,
+        useTicks      = task.useTicks or false,
+        delayTicks    = task.delayTicks or false,
+        parallel      = task.parallel or false,
+        cooldownSkip  = task.cooldownSkip or false,
+        disabled      = task.disabled or false,
+        dependsOn     = task.dependsOn or nil,
+        blockedBy     = task.blockedBy or nil,
+        executionData = {
             lastRun = 0,
             count = 0
         }
     }
 
     self.tasks[normalizedTask.name] = normalizedTask
+end
+
+---Remove a task from the timer
+---@param taskName string
+---@return boolean success True if task was removed
+function Timer:removeTask(taskName)
+    if self.tasks[taskName] then
+        self.tasks[taskName] = nil
+        return true
+    end
+    return false
+end
+
+---Disable a task (temporarily prevent it from executing)
+---@param taskName string
+---@return boolean success True if task was disabled
+function Timer:disableTask(taskName)
+    if self.tasks[taskName] then
+        self.tasks[taskName].disabled = true
+        return true
+    end
+    return false
+end
+
+---Enable a previously disabled task
+---@param taskName string
+---@return boolean success True if task was enabled
+function Timer:enableTask(taskName)
+    if self.tasks[taskName] then
+        self.tasks[taskName].disabled = false
+        return true
+    end
+    return false
+end
+
+---Reset execution data for a specific task
+---@param taskName string
+---@return boolean success True if task was reset
+function Timer:resetTask(taskName)
+    if self.tasks[taskName] then
+        self.tasks[taskName].executionData = {
+            lastRun = 0,
+            count = 0
+        }
+        return true
+    end
+    return false
+end
+
+---Reset execution data for all tasks
+function Timer:resetAllTasks()
+    for _, task in pairs(self.tasks) do
+        task.executionData = {
+            lastRun = 0,
+            count = 0
+        }
+    end
+
+    -- Also reset global execution tracking
+    self.lastExecution = {
+        tick = 0,
+        time = 0
+    }
 end
 
 ---Execute tasks based on priority and conditions
@@ -171,12 +239,23 @@ function Timer:run()
     local currentTime = os.clock() * 1000
     local executedAny = false
 
+    -- Track which tasks have executed this cycle (for dependsOn checks)
+    local executedThisCycle = {}
+
+    -- Cache condition results to avoid double evaluation
+    local conditionCache = {}
+    for taskName, task in pairs(self.tasks) do
+        conditionCache[taskName] = task.condition()
+    end
+
     -- Process parallel tasks first
     for _, task in pairs(self.tasks) do
-
-        if task.parallel and self:_canExecute(task, currentTick, currentTime)
-            and self:_isOffCooldown(task, currentTick, currentTime) then
-            self:_execute(task, currentTick, currentTime)
+        if task.parallel and self:_canExecute(task, currentTick, currentTime, conditionCache)
+            and self:_isOffCooldown(task, currentTick, currentTime)
+            and self:_checkDependencies(task, executedThisCycle) then
+            if self:_execute(task, currentTick, currentTime) then
+                executedThisCycle[task.name] = true
+            end
             executedAny = true
         end
     end
@@ -188,8 +267,8 @@ function Timer:run()
     -- Find eligible tasks and determine highest priority
     for _, task in pairs(self.tasks) do
         if not task.parallel
-            and self:_canExecute(task, currentTick, currentTime)
-            --and self:_checkDelay(task, currentTick, currentTime)
+            and self:_canExecute(task, currentTick, currentTime, conditionCache)
+        --and self:_checkDelay(task, currentTick, currentTime)
         then
             if task.priority > highestPriority then
                 highestPriority = task.priority
@@ -204,8 +283,10 @@ function Timer:run()
     if #candidates > 0 then
         for _, candidateTask in pairs(candidates) do
             if self:_isOffCooldown(candidateTask, currentTick, currentTime)
-                and self:_checkDelay(candidateTask, currentTick, currentTime) then
+                and self:_checkDelay(candidateTask, currentTick, currentTime)
+                and self:_checkDependencies(candidateTask, executedThisCycle) then
                 if self:_execute(candidateTask, currentTick, currentTime) then
+                    executedThisCycle[candidateTask.name] = true
                     executedAny = true
                 end
             end
@@ -215,20 +296,55 @@ function Timer:run()
     return executedAny
 end
 
+---Check if task dependencies are satisfied
+---@private
+---@param task Timer.Task
+---@param executedThisCycle table<string, boolean> Tasks that have executed this cycle
+---@return boolean True if all dependencies are met
+function Timer:_checkDependencies(task, executedThisCycle)
+    -- Check dependsOn: these tasks must have executed THIS cycle
+    if task.dependsOn then
+        for _, depName in ipairs(task.dependsOn) do
+            if not executedThisCycle[depName] then
+                return false
+            end
+        end
+    end
+
+    -- Check blockedBy: these tasks must have completed (run count > 0 means they've run at least once)
+    -- This is a looser constraint - they don't need to run THIS cycle, just at some point
+    if task.blockedBy then
+        for _, blockName in ipairs(task.blockedBy) do
+            local blockingTask = self.tasks[blockName]
+            if blockingTask and blockingTask.executionData.count == 0 then
+                return false
+            end
+        end
+    end
+
+    return true
+end
+
 ---Check if a task can be executed
 ---@private
 ---@param task Timer.Task
 ---@param currentTick integer
 ---@param currentTime number
+---@param conditionCache table<string, boolean> Cached condition results
 ---@return boolean
-function Timer:_canExecute(task, currentTick, currentTime)
+function Timer:_canExecute(task, currentTick, currentTime, conditionCache)
+    -- Check if task is disabled
+    if task.disabled then
+        return false
+    end
+
     -- Check if task is disabled when on cooldown
     if task.cooldownSkip and not self:_isOffCooldown(task, currentTick, currentTime) then
         return false
     end
 
-    return task.condition()
-        --and self:_isOffCooldown(task, currentTick, currentTime)
+    -- Use cached condition result
+    return conditionCache[task.name] or false
 end
 
 ---Check if task is off cooldown
@@ -251,6 +367,9 @@ end
 ---@param currentTime number
 ---@return boolean
 function Timer:_checkDelay(task, currentTick, currentTime)
+    -- Parallel tasks are never affected by delays
+    if task.parallel then return true end
+
     if task.delay <= 0 then return true end
 
     local elapsed = task.delayTicks
@@ -267,9 +386,43 @@ end
 ---@param currentTime number
 ---@return boolean
 function Timer:_execute(task, currentTick, currentTime)
-    if task.action() then
+    local success, result = pcall(task.action)
+
+    if not success then
+        -- Action threw an error
+        print(string.format("[Timer ERROR] Task '%s' failed: %s", task.name, tostring(result)))
+        return false
+    end
+
+    if result then
+        -- Debug logging
+        if self.debug then
+            local timeSinceLast = task.useTicks
+                and (currentTick - task.executionData.lastRun)
+                or (currentTime - task.executionData.lastRun)
+            local timeUnit = task.useTicks and "ticks" or "ms"
+            print(string.format("[Timer DEBUG] Executed '%s' (priority %d, run #%d, %d %s since last)",
+                task.name,
+                task.priority,
+                task.executionData.count + 1,
+                math.floor(timeSinceLast),
+                timeUnit))
+        end
+
         task.executionData.lastRun = task.useTicks and currentTick or currentTime
         task.executionData.count = task.executionData.count + 1
+
+        -- Track in recent actions (newest first, max 50)
+        table.insert(self.recentActions, 1, {
+            name = task.name,
+            timestamp = currentTime,
+            tick = currentTick
+        })
+
+        -- Remove oldest if exceeds 50
+        if #self.recentActions > 50 then
+            table.remove(self.recentActions)
+        end
 
         -- Update last execution data for delay calculations
         if not task.parallel then
@@ -381,6 +534,21 @@ function Timer:getTaskExecutionData(taskName)
         return task.executionData
     end
     return nil
+end
+
+---Retrieve recent actions (up to 50, newest first)
+---@param limit? integer Optional limit to return fewer than all recent actions
+---@return Timer.RecentAction[]
+function Timer:getRecentActions(limit)
+    if not limit or limit > #self.recentActions then
+        return self.recentActions
+    end
+
+    local limited = {}
+    for i = 1, math.min(limit, #self.recentActions) do
+        limited[i] = self.recentActions[i]
+    end
+    return limited
 end
 
 return Timer
