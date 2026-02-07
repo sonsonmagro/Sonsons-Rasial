@@ -552,3 +552,4 @@ function Timer:getRecentActions(limit)
 end
 
 return Timer
+
