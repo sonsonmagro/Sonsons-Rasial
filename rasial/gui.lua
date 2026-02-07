@@ -107,12 +107,12 @@ local STATE_COLORS = {
 -- # CONFIG FILE MANAGEMENT
 ------------------------------------------
 
-local CONFIG_DIR = os.getenv("USERPROFILE") ..
-                       "\\MemoryError\\Lua_Scripts\\configs\\"
-local CONFIG_PATH = CONFIG_DIR .. "rasial.config.json"
-local STATS_PATH = CONFIG_DIR .. "rasial.stats.json"
-local PRESETS_DIR = os.getenv("USERPROFILE") ..
-                        "\\MemoryError\\Lua_Scripts\\presets\\"
+local RASIAL_DIR = os.getenv("USERPROFILE") ..
+                       "\\MemoryError\\Lua_Scripts\\rasial\\"
+local CONFIG_PATH = RASIAL_DIR .. "config.json"
+local STATS_PATH = RASIAL_DIR .. "stats.json"
+local PRESETS_DIR = RASIAL_DIR .. "presets\\"
+local SESSIONS_DIR = RASIAL_DIR .. "sessions\\"
 
 local function loadConfigFromFile()
     local file = io.open(CONFIG_PATH, "r")
@@ -162,7 +162,7 @@ local function saveConfigToFile(cfg)
         API.printlua("Failed to encode config JSON", 4, false)
         return
     end
-    os.execute('mkdir "' .. CONFIG_DIR:gsub("/", "\\") .. '" 2>nul')
+    os.execute('mkdir "' .. RASIAL_DIR:gsub("/", "\\") .. '" 2>nul')
     local file = io.open(CONFIG_PATH, "w")
     if not file then
         API.printlua("Failed to open config file for writing", 4, false)
@@ -193,10 +193,10 @@ local newPresetName = ""
 --- Load preset names by scanning PRESETS_DIR for .json files
 local function loadPresetList()
     availablePresets = {"Default"}
-    local handle = io.popen('dir /b "' .. PRESETS_DIR .. 'rasial_*.json" 2>nul')
+    local handle = io.popen('dir /b "' .. PRESETS_DIR .. '*.json" 2>nul')
     if handle then
         for filename in handle:lines() do
-            local name = filename:match("^rasial_(.+)%.json$")
+            local name = filename:match("^(.+)%.json$")
             if name and name ~= "Default" then
                 table.insert(availablePresets, name)
             end
@@ -212,7 +212,7 @@ end
 --- @return boolean success
 local function saveConfigurationPreset(name, config)
     os.execute('mkdir "' .. PRESETS_DIR:gsub("/", "\\") .. '" 2>nul')
-    local path = PRESETS_DIR .. "rasial_" .. name .. ".json"
+    local path = PRESETS_DIR .. name .. ".json"
 
     local presetData = {
         InventoryPreset = inventoryPresetNames[config.inventoryPresetIndex],
@@ -269,7 +269,7 @@ end
 local function loadConfigurationPreset(name)
     if name == "Default" then return nil end
 
-    local path = PRESETS_DIR .. "rasial_" .. name .. ".json"
+    local path = PRESETS_DIR .. name .. ".json"
     local file = io.open(path, "r")
     if not file then return nil end
 
@@ -288,7 +288,7 @@ end
 local function deleteConfigurationPreset(name)
     if name == "Default" then return false end
 
-    local path = PRESETS_DIR .. "rasial_" .. name .. ".json"
+    local path = PRESETS_DIR .. name .. ".json"
     local result = os.remove(path)
     if result then
         loadPresetList()
@@ -576,7 +576,7 @@ local function saveStatsToFile(stats)
         API.printlua("Failed to encode stats JSON", 4, false)
         return false
     end
-    os.execute('mkdir "' .. CONFIG_DIR:gsub("/", "\\") .. '" 2>nul')
+    os.execute('mkdir "' .. RASIAL_DIR:gsub("/", "\\") .. '" 2>nul')
     local file = io.open(STATS_PATH, "w")
     if not file then
         API.printlua("Failed to open stats file for writing", 4, false)
