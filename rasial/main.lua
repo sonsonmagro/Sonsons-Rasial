@@ -1132,62 +1132,7 @@ timer:addTask({
         return false
     end,
     action = function()
-        Utils:log("Death recovery: Initiating recovery sequence", "warn")
-
-        -- Wait a moment to ensure respawn is complete
-        API.RandomSleep2(2000, 300, 500)
-
-        -- Check if already at War's Retreat
-        if warsRetreat:atLocation() then
-            Utils:log("- Already at War's Retreat, skipping teleport", "info")
-        else
-            -- Teleport to War's Retreat
-            Utils:log("- Teleporting to War's Retreat", "warn")
-            local success = Utils:useAbility("War's Retreat Teleport")
-
-            if success then
-                Utils:log("- Teleport initiated successfully", "info")
-                API.RandomSleep2(3000, 500, 1000)
-            else
-                Utils:log("- Failed to teleport to War's Retreat", "error")
-                -- Try again next cycle
-                return false
-            end
-        end
-
-        -- Reset all script state
-        Utils:log("- Resetting script state after death", "warn")
-
-        -- Reset War's Retreat object
-        warsRetreat:reset()
-
-        -- Reset fight variables
-        RasialFight.variables.bossDead = false
-        RasialFight.variables.jasProcCount = 0
-        RasialFight.variables.gateTile = nil
-        RasialFight.variables.finalZone = nil
-        RasialFight.variables.lootTile = nil
-        RasialFight.variables.safeSpot = nil
-        RasialFight.variables.looted = false
-        RasialFight.variables.phases[1] = false
-        RasialFight.variables.phases[2] = false
-
-        -- Reset lobby variables
-        RasialLobby.variables.rejoinAttempts = 0
-        RasialLobby.variables.lastInstanceAttempt = 0
-        RasialLobby.variables.instanceAttemptCount = 0
-
-        -- Unload rotation
-        rotationManager:unload()
-
-        -- Clear death state
-        Common.variables.isDead = false
-        Common.variables.deathTime = nil
-
-        Utils:log(
-            "- Death recovery complete - script will resume from War's Retreat",
-            "info")
-
+        Utils:terminate("Player dead, recovery not implemented yet.")
         return true
     end,
     executionData = {lastRun = 0, count = 0}
