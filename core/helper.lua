@@ -192,18 +192,35 @@ end
 ------------------------------------------
 
 --- Checks if inventory matches required loadout
---- @param loadout table[] # Array of {id: number, amount: number}
+--- @param loadout table[] # Array of {id: number, amount: number} or {ids: number[], amount: number}
 --- @return boolean
 function Utils:inventoryMatchCheck(loadout)
     for _, item in ipairs(loadout) do
-        if not item.id then
+        -- Support both single ID and array of IDs
+        local itemIds = {}
+        if item.ids then
+            -- Array of IDs (e.g., for items with multiple doses)
+            itemIds = item.ids
+        elseif item.id then
+            -- Single ID
+            itemIds = { item.id }
+        else
             self:terminate("Undefined item ID in inventory preset")
             return false
         end
 
-        local count = Inventory:InvItemcount(item.id)
-        local stack = Inventory:InvStackSize(item.id)
-        if count < item.amount and stack < item.amount then
+        -- Check if any of the valid IDs match the required amount
+        local found = false
+        for _, id in ipairs(itemIds) do
+            local count = Inventory:InvItemcount(id)
+            local stack = Inventory:InvStackSize(id)
+            if count >= item.amount or stack >= item.amount then
+                found = true
+                break
+            end
+        end
+
+        if not found then
             return false
         end
     end
@@ -292,8 +309,8 @@ function Utils:formatNumber(number)
 end
 
 function Utils:getLootWindowAmount()
-    ---@diagnostic disable-next-line
     local text = API.ScanForInterfaceTest2Get(false,
+    ---@diagnostic disable-next-line
         { { 1622, 4, -1, 0 }, { 1622, 6, -1, 0 }, { 1622, 2, -1, 0 }, { 1622, 3, -1, 0 } })
     if text and #text > 0 and text[1].textids then
         local value = string.match(text[1].textids, "Value: <col=[0-9A-F]+>([%d,]+[KMB]?)") -- matches numbers with commas and optional M/B suffix, with any color code
@@ -303,11 +320,11 @@ function Utils:getLootWindowAmount()
             value = string.gsub(value, "M", "000000")                                       -- convert M to 000000
             value = string.gsub(value, "B", "000000000")                                    -- convert B to 000000000
         else
-            print("No value found in text:", text[1].textids)
+            self:log("No value found in loot window text", "debug")
         end
         return tonumber(value) or 0
     else
-        print("No text data available")
+        self:log("No loot window text data available", "debug")
     end
     return 0
 end

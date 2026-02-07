@@ -83,13 +83,14 @@ PrayerFlicker.CURSES  = {
 }
 
 --- List of prayers to choose from
+--- Note: These are regular prayers (not curses). Use CURSES for Soul Split/Deflect variants.
 PrayerFlicker.PRAYERS = {
-    ECLIPSED_SOUL           = { name = "Eclipsed Soul", id = 26033 },             -- FIXME:
+    ECLIPSED_SOUL           = { name = "Eclipsed Soul", id = 34092 },             -- Necromancy prayer
     PROTECT_FROM_MELEE      = { name = "Protect from Melee", id = 25961 },
     PROTECT_FROM_MAGIC      = { name = "Protect from Magic", id = 25959 },
-    PROTECT_FROM_RANGED     = { name = "Protect from Ranged", id = 26044 },       -- FIXME:
-    PROTECT_FROM_SUMMONING  = { name = "Protect from Summoning", id = 30745 },    -- FIXME:
-    PROTECT_FROM_NECROMANCY = { name = "Protect from Necromancy", id = 30745 },   -- FIXME:
+    PROTECT_FROM_RANGED     = { name = "Protect from Missiles", id = 25960 },     -- Correct name and ID
+    PROTECT_FROM_SUMMONING  = { name = "Protect from Summoning", id = 25958 },    -- Correct ID
+    PROTECT_FROM_NECROMANCY = { name = "Protect from Necromancy", id = 34093 },   -- Necromancy prayer
 }
 
 -- Singleton instance
