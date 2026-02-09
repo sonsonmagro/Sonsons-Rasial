@@ -1,16 +1,9 @@
 ﻿# Sonson's Rasial [v2.1.1]
-
-A comprehensive, production-grade Rasial boss automation script showcasing advanced Lua scripting patterns, modular architecture, and the power of the MemoryError framework.
-
-**Disclaimer:**
-
-> This script is intentionally feature-rich to demonstrate best practices in bot scripting: a task-based scheduler (Timer), pluggable managers for rotations/buffs/prayers, abstracted GUI system with presets, persistent statistics, and defensive error handling. While it could be simpler, the architecture is designed to be maintainable, extensible, and reusable across other boss scripts.
-
 ---
 
 ## Overview
 
-Sonson's Rasial automates the Rasial boss fight from start to finish, including:
+Features:
 
 - **Pre-fight preparation** via War's Retreat (banking, prayers, buffs, conjures)
 - **Combat management** with adaptive rotations, prayer flicking, and buff tracking
